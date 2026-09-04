@@ -15,10 +15,11 @@ use uuid::Uuid;
 
 use crate::knowledge_index::{self, SearchHit};
 use crate::okf::{self, DocumentKind};
-use crate::web_source::{self, WebSourceSnapshot};
 
 mod agent_changes;
+mod atomic_write;
 mod comments;
+mod source_frontmatter;
 pub use crate::knowledge_index::BrokenLink;
 pub use agent_changes::AgentChange;
 pub use comments::{CommentMember, PageComment, PageCommentsResponse};
@@ -589,30 +590,22 @@ impl LocalEngine {
                 );
             }
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let temporary =
-            path.with_extension(format!("md.cowiki-{}.tmp", uuid::Uuid::new_v4().simple()));
         let fallback_title = relative.file_stem().unwrap_or_default().to_string_lossy();
         let normalized = okf::normalize_concept_document(content, &fallback_title)?;
-        std::fs::write(&temporary, normalized).map_err(|e| e.to_string())?;
         if create_only {
             // `exists` followed by `rename` is a TOCTOU overwrite on macOS.
             // A hard link publishes the completed temp file atomically and
             // fails if an Agent created the target after the editor noticed
             // the deletion. Both paths live in the same directory/filesystem.
-            if let Err(error) = std::fs::hard_link(&temporary, &path) {
-                let _ = std::fs::remove_file(&temporary);
-                return if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    Err("a page with this name already exists".to_string())
+            atomic_write::create_file_atomically(&path, &normalized).map_err(|error| {
+                if error == atomic_write::FILE_ALREADY_EXISTS {
+                    "a page with this name already exists".to_string()
                 } else {
-                    Err(error.to_string())
-                };
-            }
-            std::fs::remove_file(&temporary).map_err(|e| e.to_string())?;
+                    error
+                }
+            })?;
         } else {
-            std::fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+            atomic_write::replace_file_atomically(&path, &normalized)?;
         }
         okf::refresh_progressive_indexes(&space.local_path)?;
         let mut db = self
@@ -653,32 +646,46 @@ impl LocalEngine {
     ) -> Result<SourceItem, String> {
         let space = self.find_space(space_slug)?;
         okf::ensure_supported_for_write(&space.local_path)?;
+        let fallback = match source_type {
+            "url" | "url-reference" => url::Url::parse(content.trim())
+                .ok()
+                .and_then(|value| value.host_str().map(ToOwned::to_owned))
+                .unwrap_or_else(|| "web-source".to_string()),
+            _ => "source".to_string(),
+        };
+        let requested = filename.unwrap_or(&fallback);
         if source_type == "url" {
-            let snapshot = web_source::fetch_markdown_snapshot(content)?;
-            let content_hash = sha256_bytes(snapshot.markdown.as_bytes());
-            let requested = filename.unwrap_or(&snapshot.title);
-            let source = self.write_source_document(
-                &space,
-                requested,
-                &snapshot.title,
-                &snapshot.markdown,
-                Some(&content_hash),
-                Some(&snapshot),
-            )?;
+            let extracted = crate::extract::extract_url(content)?;
+            let meta = source_frontmatter::SourceFrontmatter::for_web(content.trim(), &extracted);
+            let source =
+                self.write_source_document(&space, requested, extracted.output_text(), &meta)?;
             self.refresh_source_views(&space)?;
             return Ok(source);
         }
-        let fallback = "source".to_string();
-        let requested = filename.unwrap_or(&fallback);
-        let title = requested.trim();
-        let source =
-            self.write_source_document(&space, requested, title, content.trim(), None, None)?;
+        if source_type == "url-reference" {
+            let url = content.trim();
+            if url::Url::parse(url)
+                .ok()
+                .filter(|value| matches!(value.scheme(), "http" | "https"))
+                .is_none()
+            {
+                return Err("URL must start with http:// or https://".to_string());
+            }
+            let meta = source_frontmatter::SourceFrontmatter::for_url_reference(url);
+            let source = self.write_source_document(&space, requested, url, &meta)?;
+            self.refresh_source_views(&space)?;
+            return Ok(source);
+        }
+        let body = content.trim();
+        let meta =
+            source_frontmatter::SourceFrontmatter::for_paste(requested.trim(), requested, body);
+        let source = self.write_source_document(&space, requested, body, &meta)?;
         self.refresh_source_views(&space)?;
         Ok(source)
     }
 
     /// Import files from disk, extracting text from any binary format
-    /// `extract::read_source_file` recognizes. Keeps going past a single
+    /// `extract::extract_source` recognizes. Keeps going past a single
     /// file's failure — an unsupported format or an unreadable file in a
     /// multi-select should not block the rest of the batch.
     pub fn ingest_files(
@@ -721,8 +728,8 @@ impl LocalEngine {
                 crate::extract::all_supported_extensions().join(", ")
             ));
         }
-        let text = crate::extract::read_source_file(path)?;
-        let content_hash = sha256_file(path)?;
+        let extracted = crate::extract::extract_source(path)?;
+        let source_hash = sha256_file(path)?;
         let original_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -731,14 +738,14 @@ impl LocalEngine {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or(original_name);
-        self.write_source_document(
-            space,
-            original_name,
+        let meta = source_frontmatter::SourceFrontmatter::for_file(
             title,
-            &text,
-            Some(&content_hash),
-            None,
-        )
+            original_name,
+            extracted.output_text(),
+            source_hash,
+            &extracted,
+        );
+        self.write_source_document(space, original_name, extracted.output_text(), &meta)
     }
 
     /// Shared write path for every ingest flavor: pasted text, a URL
@@ -746,28 +753,26 @@ impl LocalEngine {
     ///
     /// A file re-imported under its original name is common (re-syncing a
     /// folder, clicking Import twice by accident) and should update the
-    /// same Source rather than pile up copies — so when `content_hash` is
+    /// same Source rather than pile up copies — so when `source_hash` is
     /// given and matches what's already on disk, this returns the existing
     /// Source without writing so human or Agent annotations survive. A name
     /// collision with genuinely different content gets a hash-derived (not
     /// random) suffix, so re-importing *that* file is still idempotent instead
     /// of spawning a new copy every time. Pasted
-    /// text/URLs (`content_hash: None`) keep the original never-clobber
+    /// text/URLs (`source_hash: None`) keep the original never-clobber
     /// behavior, since two unrelated pastes can legitimately share a title.
     fn write_source_document(
         &self,
         space: &Space,
         requested_filename: &str,
-        title: &str,
         body_text: &str,
-        content_hash: Option<&str>,
-        web_snapshot: Option<&WebSourceSnapshot>,
+        meta: &source_frontmatter::SourceFrontmatter,
     ) -> Result<SourceItem, String> {
         let relative = okf::source_storage_path(requested_filename)?;
         let mut candidate = checked_space_path(&space.local_path, &relative)?;
-        let source_url = web_snapshot.map(|snapshot| snapshot.source_url.as_str());
+        let identity = source_identity_key(meta);
         if candidate.exists() {
-            if content_hash.is_some_and(|hash| source_hash_matches(&candidate, hash, source_url)) {
+            if source_document_matches(&candidate, meta) {
                 return source_item_for_path(space, &candidate);
             }
 
@@ -776,7 +781,7 @@ impl LocalEngine {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            if let Some(hash) = content_hash {
+            if let Some(hash) = identity.as_deref() {
                 let mut found = None;
                 for suffix_len in [8, 16, 32, hash.len()] {
                     let suffix = hash.get(..suffix_len).unwrap_or(hash);
@@ -785,7 +790,7 @@ impl LocalEngine {
                         found = Some(next);
                         break;
                     }
-                    if source_hash_matches(&next, hash, source_url) {
+                    if source_document_matches(&next, meta) {
                         return source_item_for_path(space, &next);
                     }
                 }
@@ -807,26 +812,7 @@ impl LocalEngine {
             }
         }
         ensure_inside(&space.local_path, &candidate)?;
-        if let Some(parent) = candidate.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-
-        let mut frontmatter = format!("title: {}\ntype: Source\n", yaml_string(title));
-        if let Some(snapshot) = web_snapshot {
-            frontmatter.push_str(&format!(
-                "source_url: {}\ncaptured_at: {}\nextractor: {}\n",
-                yaml_string(&snapshot.source_url),
-                yaml_string(&snapshot.captured_at),
-                yaml_string(web_source::EXTRACTOR_NAME),
-            ));
-            if let Some(hash) = content_hash {
-                frontmatter.push_str(&format!("content_hash: {}\n", yaml_string(hash)));
-            }
-        } else if let Some(hash) = content_hash {
-            frontmatter.push_str(&format!("source_hash: {}\n", yaml_string(hash)));
-        }
-        let body = format!("---\n{frontmatter}---\n\n{}\n", body_text.trim());
-        std::fs::write(&candidate, body).map_err(|error| error.to_string())?;
+        atomic_write::replace_file_atomically(&candidate, meta.render_document(body_text))?;
         source_item_for_path(space, &candidate)
     }
 
@@ -2171,16 +2157,6 @@ fn safe_component<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
     Ok(trimmed)
 }
 
-fn yaml_string(value: &str) -> String {
-    format!(
-        "\"{}\"",
-        value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', " ")
-    )
-}
-
 fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
@@ -2198,12 +2174,35 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn source_hash_matches(path: &Path, expected_hash: &str, expected_url: Option<&str>) -> bool {
+fn source_identity_key(meta: &source_frontmatter::SourceFrontmatter) -> Option<String> {
+    if let Some(hash) = &meta.source_hash {
+        return Some(hash.clone());
+    }
+    source_origin_url(meta).map(|url| sha256_bytes(url.as_bytes()))
+}
+
+fn source_origin_url(meta: &source_frontmatter::SourceFrontmatter) -> Option<&str> {
+    meta.requested_url
+        .as_deref()
+        .or(meta.final_url.as_deref())
+        .filter(|url| !url.is_empty())
+}
+
+fn existing_origin_url(document: &str) -> Option<String> {
+    frontmatter_field(document, "requested_url")
+        .or_else(|| frontmatter_field(document, "final_url"))
+        .or_else(|| frontmatter_field(document, "source_url"))
+}
+
+fn source_document_matches(path: &Path, meta: &source_frontmatter::SourceFrontmatter) -> bool {
     std::fs::read_to_string(path).ok().is_some_and(|existing| {
-        let hash = frontmatter_field(&existing, "source_hash")
-            .or_else(|| frontmatter_field(&existing, "content_hash"));
-        hash.as_deref() == Some(expected_hash)
-            && frontmatter_field(&existing, "source_url").as_deref() == expected_url
+        if let Some(hash) = &meta.source_hash {
+            return frontmatter_field(&existing, "source_hash").as_deref() == Some(hash.as_str());
+        }
+        match (source_origin_url(meta), existing_origin_url(&existing)) {
+            (Some(origin), Some(existing_origin)) => origin == existing_origin,
+            _ => false,
+        }
     })
 }
 
@@ -4495,6 +4494,10 @@ mod tests {
         let body =
             std::fs::read_to_string(folder.join(".cowiki/sources").join(&item.filename)).unwrap();
         assert!(body.contains("type: Source"));
+        assert!(body.contains("content_hash: \"sha256:"));
+        assert!(body.contains("warnings: []"));
+        assert!(!body.contains("source_hash:"));
+        assert!(!body.contains("extractor:"));
         assert!(body.contains("keeps working offline"));
         assert_eq!(
             engine
@@ -4519,32 +4522,20 @@ mod tests {
         let folder = temp.path().join("knowledge");
         std::fs::create_dir_all(&folder).unwrap();
         let space = engine.add_space("Knowledge", "knowledge", &folder).unwrap();
-        let mut snapshot = crate::web_source::WebSourceSnapshot {
-            title: "Same title".into(),
-            source_url: "https://one.example/article".into(),
-            captured_at: "2026-09-12T00:00:00Z".into(),
-            markdown: "# Same text".into(),
-        };
-        let hash = super::sha256_bytes(snapshot.markdown.as_bytes());
         let first = engine
-            .write_source_document(
-                &space,
-                &snapshot.title,
-                &snapshot.title,
-                &snapshot.markdown,
-                Some(&hash),
-                Some(&snapshot),
+            .ingest(
+                &space.slug,
+                "url-reference",
+                "https://one.example/article",
+                Some("Same title"),
             )
             .unwrap();
-        snapshot.source_url = "https://two.example/article".into();
         let second = engine
-            .write_source_document(
-                &space,
-                &snapshot.title,
-                &snapshot.title,
-                &snapshot.markdown,
-                Some(&hash),
-                Some(&snapshot),
+            .ingest(
+                &space.slug,
+                "url-reference",
+                "https://two.example/article",
+                Some("Same title"),
             )
             .unwrap();
         assert_ne!(
@@ -4557,16 +4548,86 @@ mod tests {
             .content
             .contains("https://two.example/article"));
         let repeated = engine
-            .write_source_document(
-                &space,
-                &snapshot.title,
-                &snapshot.title,
-                &snapshot.markdown,
-                Some(&hash),
-                Some(&snapshot),
+            .ingest(
+                &space.slug,
+                "url-reference",
+                "https://two.example/article",
+                Some("Same title"),
             )
             .unwrap();
         assert_eq!(second.filename, repeated.filename);
+    }
+
+    #[test]
+    fn ingested_file_and_url_write_extract_frontmatter() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = LocalEngine::open(&temp.path().join("metadata")).unwrap();
+        let folder = temp.path().join("knowledge");
+        std::fs::create_dir_all(&folder).unwrap();
+        let space = engine.add_space("Knowledge", "knowledge", &folder).unwrap();
+
+        let source_path = temp.path().join("report.txt");
+        let file_body = "Imported report body that is long enough to avoid a short-output warning.";
+        std::fs::write(&source_path, file_body).unwrap();
+        let file = engine
+            .ingest_files(&space.slug, &[source_path.to_string_lossy().into_owned()])
+            .unwrap();
+        let file = file[0].source.as_ref().unwrap();
+        let file_doc =
+            std::fs::read_to_string(folder.join(".cowiki/sources").join(&file.filename)).unwrap();
+        assert!(file_doc.contains("type: Source"));
+        assert!(file_doc.contains("resource: \"report.txt\""));
+        assert!(file_doc.contains("source_hash:"));
+        assert!(file_doc.contains("content_hash: \"sha256:"));
+        assert!(file_doc.contains("warnings: []"));
+        assert!(!file_doc.contains("extractor:"));
+        assert!(!file_doc.contains("requested_url:"));
+        assert!(file_doc.contains(file_body));
+
+        let article = temp.path().join("retry.html");
+        std::fs::write(
+            &article,
+            r#"<!doctype html><html><head><title>Retry Patterns</title></head>
+<body><nav><a href="/">Home</a></nav>
+<article><h1>Retry Patterns</h1>
+<p>Exponential backoff retries a failed request after a delay that doubles each time, up to a configured maximum. That keeps a struggling dependency from being stampeded by a herd of identical clients.</p>
+<p>Jitter spreads those retries so many clients do not wake up on the same tick.</p>
+</article></body></html>"#,
+        )
+        .unwrap();
+        let html = engine
+            .ingest_files(&space.slug, &[article.to_string_lossy().into_owned()])
+            .unwrap();
+        let html = html[0].source.as_ref().unwrap();
+        let html_doc =
+            std::fs::read_to_string(folder.join(".cowiki/sources").join(&html.filename)).unwrap();
+        assert!(html_doc.contains("Exponential backoff"));
+        assert!(!html_doc.contains("extractor:"));
+        assert!(!html_doc.contains("requested_url:"));
+
+        let error = engine
+            .ingest(&space.slug, "url", "javascript:alert(1)", None)
+            .unwrap_err();
+        assert!(error.contains("http"), "{error}");
+
+        let url = "https://example.com/only-a-url";
+        let saved = engine
+            .ingest(&space.slug, "url-reference", url, None)
+            .unwrap();
+        let saved_doc =
+            std::fs::read_to_string(folder.join(".cowiki/sources").join(&saved.filename)).unwrap();
+        assert!(saved_doc.contains("requested_url: \"https://example.com/only-a-url\""));
+        assert!(saved_doc.ends_with(&format!("\n\n{url}\n")));
+
+        let stub = temp.path().join("link.txt");
+        std::fs::write(&stub, "https://example.com/only-a-url").unwrap();
+        let warned = engine
+            .ingest_files(&space.slug, &[stub.to_string_lossy().into_owned()])
+            .unwrap();
+        let warned = warned[0].source.as_ref().unwrap();
+        let warned_doc =
+            std::fs::read_to_string(folder.join(".cowiki/sources").join(&warned.filename)).unwrap();
+        assert!(warned_doc.contains("TEMPLATE_OUTPUT"));
     }
 
     #[test]
@@ -4609,24 +4670,47 @@ mod tests {
         let item = engine
             .ingest(&space.slug, "url", &source_url, None)
             .unwrap();
-        assert_eq!(item.title, "CoWiki & Local AI");
         server.join().unwrap();
         let source = engine.get_source(&space.slug, &item.filename).unwrap();
-        assert!(source
-            .content
-            .contains(&format!("source_url: \"{source_url}\"")));
-        assert!(source.content.contains("captured_at:"));
-        assert!(source
-            .content
-            .contains("extractor: \"cowiki-html-to-markdown-v1\""));
+        assert!(source.content.contains("requested_url:"));
+        assert!(source.content.contains("source_url:"));
         assert!(source.content.contains("content_hash:"));
-        assert!(source.content.contains("# Knowledge stays yours"));
-        assert!(source.content.contains(&format!(
-            "[portable knowledge](http://{address}/principles)"
-        )));
+        assert!(source.content.contains("Knowledge stays yours"));
+        assert!(source.content.contains("portable knowledge"));
         assert!(!source.content.contains("Site navigation"));
         assert!(!source.content.contains("must not be stored"));
         assert!(!folder.join(".cowiki/sources").join("article.html").exists());
+    }
+
+    #[test]
+    fn source_ingest_leaves_no_partial_temp_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = LocalEngine::open(&temp.path().join("metadata")).unwrap();
+        let folder = temp.path().join("knowledge");
+        std::fs::create_dir_all(&folder).unwrap();
+        let space = engine.add_space("Knowledge", "knowledge", &folder).unwrap();
+        let item = engine
+            .ingest(&space.slug, "text", "Atomic source body.", Some("Note"))
+            .unwrap();
+        let parent = folder
+            .join(".cowiki/sources")
+            .join(&item.filename)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let leftovers: Vec<_> = std::fs::read_dir(&parent)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name())
+            .filter(|name| {
+                name.to_str()
+                    .is_some_and(|name| name.contains(".cowiki-") && name.ends_with(".tmp"))
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "ingest left temp files: {leftovers:?}"
+        );
     }
 
     #[test]

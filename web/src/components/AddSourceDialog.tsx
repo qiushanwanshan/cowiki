@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CheckCircle2, Sparkles, Type, Link2, FileUp, X } from 'lucide-react';
+import { CheckCircle2, Sparkles, Type, Link2, FileUp, X, XCircle } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
@@ -11,7 +11,13 @@ import { isDesktopClient } from '../runtime';
 import { chooseSourceFiles, ingestFiles } from '../local-api';
 import {
   fileIngestResult,
+  ingestErrorMessage,
   mergeImportedSources,
+  sourceImportFailureDetail,
+  sourceImportFailureHint,
+  sourceImportFailureTitle,
+  sourceImportSaveUrlLabel,
+  sourceImportSaveUrlProgressLabel,
   sourceImportStorageLabel,
   sourceImportProgressLabel,
   sourceReadyLabel,
@@ -48,12 +54,14 @@ export function AddSourceDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [importedSources, setImportedSources] = useState<SourceItem[]>([]);
+  const [importFailed, setImportFailed] = useState(false);
 
   const reset = () => {
     setContent('');
     setSelectedFiles([]);
     setError('');
     setImportedSources([]);
+    setImportFailed(false);
   };
 
   const handleOpenChange = (isOpen: boolean) => {
@@ -68,7 +76,7 @@ export function AddSourceDialog({
       setSelectedFiles((current) => [...new Set([...current, ...picked])]);
       setError('');
     } catch (err) {
-      setError(`Failed to choose files: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setError(ingestErrorMessage(err) || 'Failed to choose files.');
     }
   };
 
@@ -77,6 +85,7 @@ export function AddSourceDialog({
   const handleSubmitFiles = async () => {
     setLoading(true);
     setError('');
+    setImportFailed(false);
     try {
       const outcomes = await ingestFiles(workspaceSlug, selectedFiles);
       const result = fileIngestResult(outcomes);
@@ -90,9 +99,11 @@ export function AddSourceDialog({
       } else {
         setSelectedFiles(result.remainingFiles);
         setError(result.error);
+        if (!imported.length) setImportFailed(true);
       }
     } catch (err) {
-      setError(`Failed to add sources: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setError(ingestErrorMessage(err));
+      setImportFailed(true);
     } finally {
       setLoading(false);
     }
@@ -109,13 +120,33 @@ export function AddSourceDialog({
     if (!content.trim()) return;
     setLoading(true);
     setError('');
+    setImportFailed(false);
     try {
       const source = await ingest(activeTab, content, branch, undefined, workspaceSlug) as SourceItem;
       setImportedSources((current) => mergeImportedSources(current, [source]));
       setContent('');
       onImported();
     } catch (err) {
-      setError(`Failed to add source: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setError(ingestErrorMessage(err));
+      setImportFailed(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSaveUrl = async () => {
+    if (!content.trim()) return;
+    setLoading(true);
+    setError('');
+    try {
+      const source = await ingest('url-reference', content, branch, undefined, workspaceSlug) as SourceItem;
+      setImportedSources((current) => mergeImportedSources(current, [source]));
+      setImportFailed(false);
+      setError('');
+      setContent('');
+      onImported();
+    } catch (err) {
+      setError(ingestErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -123,6 +154,8 @@ export function AddSourceDialog({
 
   const canSubmit = activeTab === 'file' ? selectedFiles.length > 0 : !!content.trim();
   const defaultAgentName = agentDisplayName(defaultAgent);
+  const showingResult = importedSources.length > 0 || importFailed;
+  const importFailedCompletely = importFailed && importedSources.length === 0;
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -134,35 +167,73 @@ export function AddSourceDialog({
           </DialogTitle>
         </DialogHeader>
 
-        {importedSources.length > 0 ? (
+        {showingResult ? (
           <div className="space-y-5 py-2">
             <div className="flex items-start gap-3 rounded-lg border bg-muted/35 p-4">
-              <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-green" />
+              {importFailedCompletely ? (
+                <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-red" />
+              ) : (
+                <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-green" />
+              )}
               <div className="min-w-0">
                 <p className="font-medium">
-                  {importedSources.length} source{importedSources.length === 1 ? '' : 's'} imported
+                  {importFailedCompletely
+                    ? sourceImportFailureTitle(activeTab)
+                    : `${importedSources.length} source${importedSources.length === 1 ? '' : 's'} imported`}
                 </p>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {sourceImportStorageLabel(desktop)}
+                  {importFailedCompletely
+                    ? sourceImportFailureDetail(error)
+                    : sourceImportStorageLabel(desktop)}
                 </p>
               </div>
             </div>
-            {error && (
-              <div className="rounded-lg border border-red/20 bg-red-soft p-3 text-sm text-red">
+            {error && !importFailedCompletely && (
+              <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red">
                 <p className="font-medium">Some files still need attention</p>
                 <p className="mt-1 text-xs leading-relaxed">{error}</p>
               </div>
             )}
-            {desktop && onOrganize && (
+            {importFailedCompletely ? (
+              <div>
+                <p className="text-sm font-medium">
+                  {activeTab === 'url' ? 'Nothing was saved yet' : 'Nothing was saved'}
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  {sourceImportFailureHint(activeTab)}
+                </p>
+              </div>
+            ) : desktop && onOrganize ? (
               <div>
                 <p className="text-sm font-medium">{sourceReadyLabel(defaultAgentName)}</p>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                   This opens an isolated Agent Change. You can review its knowledge edits before merging them into the Current Draft.
                 </p>
               </div>
-            )}
+            ) : null}
             <div className="flex flex-wrap gap-2">
-              {error && selectedFiles.length > 0 && (
+              {importFailedCompletely && activeTab === 'url' && (
+                <Button
+                  type="button"
+                  disabled={loading || !content.trim()}
+                  onClick={() => { void handleSaveUrl(); }}
+                >
+                  {loading ? sourceImportSaveUrlProgressLabel() : sourceImportSaveUrlLabel()}
+                </Button>
+              )}
+              {importFailedCompletely && activeTab !== 'url' && (
+                <Button
+                  type="button"
+                  disabled={loading}
+                  onClick={() => {
+                    setImportFailed(false);
+                    setError('');
+                  }}
+                >
+                  Try again
+                </Button>
+              )}
+              {error && selectedFiles.length > 0 && !importFailedCompletely && (
                 <Button
                   type="button"
                   variant="outline"
@@ -174,7 +245,7 @@ export function AddSourceDialog({
                     : `Retry ${selectedFiles.length} failed file${selectedFiles.length === 1 ? '' : 's'}`}
                 </Button>
               )}
-              {desktop && onOrganize && (
+              {!importFailedCompletely && desktop && onOrganize && (
                 <Button
                   type="button"
                   onClick={() => {
@@ -234,7 +305,7 @@ export function AddSourceDialog({
                 placeholder="https://example.com/article"
               />
               <p className="text-xs text-muted-foreground">
-                The page is captured as Markdown with its URL and capture time. Codex or Claude can then organize durable knowledge.
+                CoWiki fetches the page and saves the article as Markdown. JavaScript-only apps cannot be extracted yet.
               </p>
             </TabsContent>
 

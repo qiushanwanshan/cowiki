@@ -12,6 +12,9 @@ export function sourceImportProgressLabel(kind: SourceImportKind, fileCount: num
   if (kind === 'file') {
     return `Reading and extracting ${fileCount} source${fileCount === 1 ? '' : 's'}…`;
   }
+  if (kind === 'url') {
+    return 'Fetching and extracting page…';
+  }
   return 'Saving and indexing source…';
 }
 
@@ -23,6 +26,49 @@ export function sourceImportStorageLabel(desktop: boolean): string {
   return desktop
     ? 'Saved locally and added to the OKF and search indexes.'
     : 'Added to this Space and its search index.';
+}
+
+export function sourceImportFailureTitle(kind: SourceImportKind): string {
+  if (kind === 'url') return "Couldn't import this page";
+  if (kind === 'file') return "Couldn't import these files";
+  return "Couldn't import this source";
+}
+
+export function sourceImportFailureHint(kind: SourceImportKind): string {
+  if (kind === 'url') {
+    return 'Save the link as a Source, or switch to Text and paste the article.';
+  }
+  if (kind === 'file') {
+    return 'You can retry the failed files, or choose different ones.';
+  }
+  return 'You can edit the text and try again.';
+}
+
+export function sourceImportSaveUrlLabel(): string {
+  return 'Save URL';
+}
+
+export function sourceImportSaveUrlProgressLabel(): string {
+  return 'Saving URL…';
+}
+
+export function ingestErrorMessage(cause: unknown): string {
+  if (typeof cause === 'string' && cause.trim()) return cause.trim();
+  if (cause instanceof Error && cause.message.trim()) return cause.message.trim();
+  if (cause && typeof cause === 'object') {
+    const record = cause as Record<string, unknown>;
+    for (const key of ['message', 'error']) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+  }
+  return '';
+}
+
+export function sourceImportFailureDetail(error: string): string {
+  const trimmed = error.trim();
+  if (!trimmed) return 'Something went wrong while importing.';
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
 }
 
 export function mergeImportedSources(
@@ -43,7 +89,7 @@ export function sourceOrganizationTask(sources: SourceItem[]): string {
     .join('\n');
   return [
     'Organize the newly imported OKF Source files below into durable knowledge.',
-    'Read each Source, update the appropriate Concepts and indexes, and do not modify the Source files.',
+    'Read each Source, update the appropriate Concepts and indexes, preserve provenance and Source frontmatter, and do not modify the Source files.',
     'Preserve provenance in every knowledge page you create or update with portable frontmatter in this exact form:',
     'sources:',
     '  - .cowiki/sources/<source-file>.md',

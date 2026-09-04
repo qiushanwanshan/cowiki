@@ -20,12 +20,18 @@ export function restoreSystemFrontmatter(systemFrontmatter: string, body: string
 /** Return the safe HTTP(S) origin link recorded for a captured web Source. */
 export function sourceUrlFromDocument(document: string): string | null {
   const { systemFrontmatter } = splitSystemFrontmatter(document);
-  const line = systemFrontmatter
-    .split(/\r?\n/)
-    .find((candidate) => candidate.startsWith('source_url:'));
-  if (!line) return null;
+  const keys = ['final_url:', 'requested_url:', 'source_url:'];
+  const lines = systemFrontmatter.split(/\r?\n/);
+  for (const key of keys) {
+    const line = lines.find((candidate) => candidate.startsWith(key));
+    if (!line) continue;
+    const parsed = parseFrontmatterUrl(line.slice(key.length).trim());
+    if (parsed) return parsed;
+  }
+  return null;
+}
 
-  const encoded = line.slice('source_url:'.length).trim();
+function parseFrontmatterUrl(encoded: string): string | null {
   let value = encoded.replace(/^['"]|['"]$/g, '');
   if (encoded.startsWith('"') && encoded.endsWith('"')) {
     try {
