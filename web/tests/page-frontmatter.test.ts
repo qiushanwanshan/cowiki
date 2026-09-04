@@ -22,3 +22,24 @@ test('read-only Source rendering hides OKF frontmatter', () => {
 
   assert.equal(source.body, 'https://example.com');
 });
+
+test('read-only Source rendering hides resource provenance fields', () => {
+  const source = splitSystemFrontmatter(`---
+type: Source
+title: "Example"
+resource: "https://example.com/article"
+requested_url: "https://example.com/article"
+final_url: "https://www.example.com/article"
+timestamp: "2026-09-01T10:30:00Z"
+content_hash: "sha256:abc"
+warnings:
+  - WEB_SPA_SHELL_DETECTED
+---
+
+Article body
+`);
+
+  assert.equal(source.body, 'Article body\n');
+  assert.match(source.systemFrontmatter, /requested_url: "https:\/\/example.com\/article"/);
+  assert.match(source.systemFrontmatter, /WEB_SPA_SHELL_DETECTED/);
+});

@@ -3,7 +3,13 @@ import test from 'node:test';
 
 import {
   fileIngestResult,
+  ingestErrorMessage,
   mergeImportedSources,
+  sourceImportFailureDetail,
+  sourceImportFailureHint,
+  sourceImportFailureTitle,
+  sourceImportSaveUrlLabel,
+  sourceImportSaveUrlProgressLabel,
   sourceImportStorageLabel,
   sourceImportProgressLabel,
   sourceOrganizationTask,
@@ -31,11 +37,35 @@ test('successful file ingest clears the selection and closes the dialog', () => 
 });
 
 test('Source import feedback distinguishes local extraction from Agent organization', () => {
-  assert.equal(sourceImportProgressLabel('url', 0), 'Saving and indexing source…');
+  assert.equal(sourceImportProgressLabel('url', 0), 'Fetching and extracting page…');
   assert.equal(sourceImportProgressLabel('file', 3), 'Reading and extracting 3 sources…');
   assert.equal(sourceReadyLabel('Codex'), 'Ready for Codex to organize');
   assert.equal(sourceImportStorageLabel(true), 'Saved locally and added to the OKF and search indexes.');
   assert.equal(sourceImportStorageLabel(false), 'Added to this Space and its search index.');
+});
+
+test('failed Source import uses a result card that mirrors success copy', () => {
+  assert.equal(sourceImportFailureTitle('url'), "Couldn't import this page");
+  assert.equal(sourceImportFailureTitle('file'), "Couldn't import these files");
+  assert.equal(sourceImportFailureTitle('text'), "Couldn't import this source");
+  assert.match(sourceImportFailureHint('url'), /Save the link/);
+  assert.equal(sourceImportSaveUrlLabel(), 'Save URL');
+  assert.equal(sourceImportSaveUrlProgressLabel(), 'Saving URL…');
+  assert.equal(
+    sourceImportFailureDetail('this page looks like a JavaScript app and needs dynamic capture'),
+    'This page looks like a JavaScript app and needs dynamic capture',
+  );
+  assert.equal(sourceImportFailureDetail(''), 'Something went wrong while importing.');
+});
+
+test('ingest errors unwrap Tauri string payloads instead of Unknown error', () => {
+  assert.equal(
+    ingestErrorMessage('this page looks like a login or challenge wall'),
+    'this page looks like a login or challenge wall',
+  );
+  assert.equal(ingestErrorMessage(new Error('page not found (HTTP 404)')), 'page not found (HTTP 404)');
+  assert.equal(ingestErrorMessage({ message: 'cannot connect to the page' }), 'cannot connect to the page');
+  assert.equal(ingestErrorMessage({}), '');
 });
 
 test('partial retries retain every successfully imported Source without duplicates', () => {
@@ -56,5 +86,6 @@ test('Agent organization task names exact Source paths, not display titles', () 
 
   assert.match(task, /sources\/_encoded\/first\.md/);
   assert.match(task, /sources\/_encoded\/second\.md/);
+  assert.match(task, /preserve provenance and Source frontmatter/);
   assert.doesNotMatch(task, /Ignore previous instructions/);
 });

@@ -17,6 +17,8 @@ use crate::knowledge_index::{self, SearchHit};
 use crate::okf::{self, DocumentKind};
 
 mod agent_changes;
+mod atomic_write;
+mod source_frontmatter;
 pub use crate::knowledge_index::BrokenLink;
 pub use agent_changes::AgentChange;
 
@@ -559,30 +561,22 @@ impl LocalEngine {
                 );
             }
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let temporary =
-            path.with_extension(format!("md.cowiki-{}.tmp", uuid::Uuid::new_v4().simple()));
         let fallback_title = relative.file_stem().unwrap_or_default().to_string_lossy();
         let normalized = okf::normalize_concept_document(content, &fallback_title)?;
-        std::fs::write(&temporary, normalized).map_err(|e| e.to_string())?;
         if create_only {
             // `exists` followed by `rename` is a TOCTOU overwrite on macOS.
             // A hard link publishes the completed temp file atomically and
             // fails if an Agent created the target after the editor noticed
             // the deletion. Both paths live in the same directory/filesystem.
-            if let Err(error) = std::fs::hard_link(&temporary, &path) {
-                let _ = std::fs::remove_file(&temporary);
-                return if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    Err("a page with this name already exists".to_string())
+            atomic_write::create_file_atomically(&path, &normalized).map_err(|error| {
+                if error == atomic_write::FILE_ALREADY_EXISTS {
+                    "a page with this name already exists".to_string()
                 } else {
-                    Err(error.to_string())
-                };
-            }
-            std::fs::remove_file(&temporary).map_err(|e| e.to_string())?;
+                    error
+                }
+            })?;
         } else {
-            std::fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+            atomic_write::replace_file_atomically(&path, &normalized)?;
         }
         okf::refresh_progressive_indexes(&space.local_path)?;
         let mut db = self
@@ -624,25 +618,45 @@ impl LocalEngine {
         let space = self.find_space(space_slug)?;
         okf::ensure_supported_for_write(&space.local_path)?;
         let fallback = match source_type {
-            "url" => url::Url::parse(content.trim())
+            "url" | "url-reference" => url::Url::parse(content.trim())
                 .ok()
                 .and_then(|value| value.host_str().map(ToOwned::to_owned))
                 .unwrap_or_else(|| "web-source".to_string()),
             _ => "source".to_string(),
         };
         let requested = filename.unwrap_or(&fallback);
-        let title = if source_type == "url" {
-            content.trim()
-        } else {
-            requested.trim()
-        };
-        let source = self.write_source_document(&space, requested, title, content.trim(), None)?;
+        if source_type == "url" {
+            let extracted = crate::extract::extract_url(content)?;
+            let meta = source_frontmatter::SourceFrontmatter::for_web(content.trim(), &extracted);
+            let source =
+                self.write_source_document(&space, requested, extracted.output_text(), &meta)?;
+            self.refresh_source_views(&space)?;
+            return Ok(source);
+        }
+        if source_type == "url-reference" {
+            let url = content.trim();
+            if url::Url::parse(url)
+                .ok()
+                .filter(|value| matches!(value.scheme(), "http" | "https"))
+                .is_none()
+            {
+                return Err("URL must start with http:// or https://".to_string());
+            }
+            let meta = source_frontmatter::SourceFrontmatter::for_url_reference(url);
+            let source = self.write_source_document(&space, requested, url, &meta)?;
+            self.refresh_source_views(&space)?;
+            return Ok(source);
+        }
+        let body = content.trim();
+        let meta =
+            source_frontmatter::SourceFrontmatter::for_paste(requested.trim(), requested, body);
+        let source = self.write_source_document(&space, requested, body, &meta)?;
         self.refresh_source_views(&space)?;
         Ok(source)
     }
 
     /// Import files from disk, extracting text from any binary format
-    /// `extract::read_source_file` recognizes. Keeps going past a single
+    /// `extract::extract_source` recognizes. Keeps going past a single
     /// file's failure — an unsupported format or an unreadable file in a
     /// multi-select should not block the rest of the batch.
     pub fn ingest_files(
@@ -685,8 +699,8 @@ impl LocalEngine {
                 crate::extract::all_supported_extensions().join(", ")
             ));
         }
-        let text = crate::extract::read_source_file(path)?;
-        let content_hash = sha256_file(path)?;
+        let extracted = crate::extract::extract_source(path)?;
+        let source_hash = sha256_file(path)?;
         let original_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -695,7 +709,14 @@ impl LocalEngine {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or(original_name);
-        self.write_source_document(space, original_name, title, &text, Some(&content_hash))
+        let meta = source_frontmatter::SourceFrontmatter::for_file(
+            title,
+            original_name,
+            extracted.output_text(),
+            source_hash,
+            &extracted,
+        );
+        self.write_source_document(space, original_name, extracted.output_text(), &meta)
     }
 
     /// Shared write path for every ingest flavor: pasted text, a URL
@@ -703,26 +724,29 @@ impl LocalEngine {
     ///
     /// A file re-imported under its original name is common (re-syncing a
     /// folder, clicking Import twice by accident) and should update the
-    /// same Source rather than pile up copies — so when `content_hash` is
+    /// same Source rather than pile up copies — so when `source_hash` is
     /// given and matches what's already on disk, this returns the existing
     /// Source without writing so human or Agent annotations survive. A name
     /// collision with genuinely different content gets a hash-derived (not
     /// random) suffix, so re-importing *that* file is still idempotent instead
     /// of spawning a new copy every time. Pasted
-    /// text/URLs (`content_hash: None`) keep the original never-clobber
+    /// text/URLs (`source_hash: None`) keep the original never-clobber
     /// behavior, since two unrelated pastes can legitimately share a title.
     fn write_source_document(
         &self,
         space: &Space,
         requested_filename: &str,
-        title: &str,
         body_text: &str,
-        content_hash: Option<&str>,
+        meta: &source_frontmatter::SourceFrontmatter,
     ) -> Result<SourceItem, String> {
         let relative = okf::source_storage_path(requested_filename)?;
         let mut candidate = checked_space_path(&space.local_path, &relative)?;
         if candidate.exists() {
-            if content_hash.is_some_and(|hash| source_hash_matches(&candidate, hash)) {
+            if meta
+                .source_hash
+                .as_deref()
+                .is_some_and(|hash| source_hash_matches(&candidate, hash))
+            {
                 return source_item_for_path(space, &candidate);
             }
 
@@ -731,7 +755,7 @@ impl LocalEngine {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            if let Some(hash) = content_hash {
+            if let Some(hash) = meta.source_hash.as_deref() {
                 let mut found = None;
                 for suffix_len in [8, 16, 32, hash.len()] {
                     let suffix = hash.get(..suffix_len).unwrap_or(hash);
@@ -762,16 +786,8 @@ impl LocalEngine {
             }
         }
         ensure_inside(&space.local_path, &candidate)?;
-        if let Some(parent) = candidate.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
 
-        let mut frontmatter = format!("title: {}\ntype: Source\n", yaml_string(title));
-        if let Some(hash) = content_hash {
-            frontmatter.push_str(&format!("source_hash: {}\n", yaml_string(hash)));
-        }
-        let body = format!("---\n{frontmatter}---\n\n{}\n", body_text.trim());
-        std::fs::write(&candidate, body).map_err(|error| error.to_string())?;
+        atomic_write::replace_file_atomically(&candidate, meta.render_document(body_text))?;
         source_item_for_path(space, &candidate)
     }
 
@@ -2065,16 +2081,6 @@ fn safe_component<'a>(value: &'a str, label: &str) -> Result<&'a str, String> {
         return Err(format!("invalid {label}"));
     }
     Ok(trimmed)
-}
-
-fn yaml_string(value: &str) -> String {
-    format!(
-        "\"{}\"",
-        value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', " ")
-    )
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -4152,6 +4158,10 @@ mod tests {
         let body =
             std::fs::read_to_string(folder.join(".cowiki/sources").join(&item.filename)).unwrap();
         assert!(body.contains("type: Source"));
+        assert!(body.contains("content_hash: \"sha256:"));
+        assert!(body.contains("warnings: []"));
+        assert!(!body.contains("source_hash:"));
+        assert!(!body.contains("extractor:"));
         assert!(body.contains("keeps working offline"));
         assert_eq!(
             engine
@@ -4167,6 +4177,109 @@ mod tests {
             .any(|diff| diff.path == format!(".cowiki/sources/{}", item.filename)));
         assert!(engine.submit(&space.slug, &[]).unwrap().committed);
         assert!(!engine.has_uncommitted_changes(&space.slug).unwrap());
+    }
+
+    #[test]
+    fn ingested_file_and_url_write_extract_frontmatter() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = LocalEngine::open(&temp.path().join("metadata")).unwrap();
+        let folder = temp.path().join("knowledge");
+        std::fs::create_dir_all(&folder).unwrap();
+        let space = engine.add_space("Knowledge", "knowledge", &folder).unwrap();
+
+        let source_path = temp.path().join("report.txt");
+        let file_body = "Imported report body that is long enough to avoid a short-output warning.";
+        std::fs::write(&source_path, file_body).unwrap();
+        let file = engine
+            .ingest_files(&space.slug, &[source_path.to_string_lossy().into_owned()])
+            .unwrap();
+        let file = file[0].source.as_ref().unwrap();
+        let file_doc =
+            std::fs::read_to_string(folder.join(".cowiki/sources").join(&file.filename)).unwrap();
+        assert!(file_doc.contains("type: Source"));
+        assert!(file_doc.contains("resource: \"report.txt\""));
+        assert!(file_doc.contains("source_hash:"));
+        assert!(file_doc.contains("content_hash: \"sha256:"));
+        assert!(file_doc.contains("warnings: []"));
+        assert!(!file_doc.contains("extractor:"));
+        assert!(!file_doc.contains("requested_url:"));
+        assert!(file_doc.contains(file_body));
+
+        let article = temp.path().join("retry.html");
+        std::fs::write(
+            &article,
+            r#"<!doctype html><html><head><title>Retry Patterns</title></head>
+<body><nav><a href="/">Home</a></nav>
+<article><h1>Retry Patterns</h1>
+<p>Exponential backoff retries a failed request after a delay that doubles each time, up to a configured maximum. That keeps a struggling dependency from being stampeded by a herd of identical clients.</p>
+<p>Jitter spreads those retries so many clients do not wake up on the same tick.</p>
+</article></body></html>"#,
+        )
+        .unwrap();
+        let html = engine
+            .ingest_files(&space.slug, &[article.to_string_lossy().into_owned()])
+            .unwrap();
+        let html = html[0].source.as_ref().unwrap();
+        let html_doc =
+            std::fs::read_to_string(folder.join(".cowiki/sources").join(&html.filename)).unwrap();
+        assert!(html_doc.contains("Exponential backoff"));
+        assert!(!html_doc.contains("extractor:"));
+        assert!(!html_doc.contains("requested_url:"));
+
+        let error = engine
+            .ingest(&space.slug, "url", "javascript:alert(1)", None)
+            .unwrap_err();
+        assert!(error.contains("http"), "{error}");
+
+        let url = "https://example.com/only-a-url";
+        let saved = engine
+            .ingest(&space.slug, "url-reference", url, None)
+            .unwrap();
+        let saved_doc =
+            std::fs::read_to_string(folder.join(".cowiki/sources").join(&saved.filename)).unwrap();
+        assert!(saved_doc.contains("requested_url: \"https://example.com/only-a-url\""));
+        assert!(saved_doc.ends_with(&format!("\n\n{url}\n")));
+
+        let stub = temp.path().join("link.txt");
+        std::fs::write(&stub, "https://example.com/only-a-url").unwrap();
+        let warned = engine
+            .ingest_files(&space.slug, &[stub.to_string_lossy().into_owned()])
+            .unwrap();
+        let warned = warned[0].source.as_ref().unwrap();
+        let warned_doc =
+            std::fs::read_to_string(folder.join(".cowiki/sources").join(&warned.filename)).unwrap();
+        assert!(warned_doc.contains("TEMPLATE_OUTPUT"));
+    }
+
+    #[test]
+    fn source_ingest_leaves_no_partial_temp_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = LocalEngine::open(&temp.path().join("metadata")).unwrap();
+        let folder = temp.path().join("knowledge");
+        std::fs::create_dir_all(&folder).unwrap();
+        let space = engine.add_space("Knowledge", "knowledge", &folder).unwrap();
+        let item = engine
+            .ingest(&space.slug, "text", "Atomic source body.", Some("Note"))
+            .unwrap();
+        let parent = folder
+            .join(".cowiki/sources")
+            .join(&item.filename)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let leftovers: Vec<_> = std::fs::read_dir(&parent)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name())
+            .filter(|name| {
+                name.to_str()
+                    .is_some_and(|name| name.contains(".cowiki-") && name.ends_with(".tmp"))
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "ingest left temp files: {leftovers:?}"
+        );
     }
 
     #[test]
