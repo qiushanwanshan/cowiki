@@ -333,7 +333,7 @@ export function AddSourceDialog({
                   </ul>
                 )}
                 <p className="text-xs text-muted-foreground">
-                  PDF, Word, PowerPoint, and spreadsheet files are converted to text on import. Unsupported formats are reported per file.
+                  PDF, Word, PowerPoint, spreadsheets, and images are converted to Markdown on import. Images are recognized with the built-in OS OCR (macOS Vision / Windows OCR); scanned PDFs are marked pending_ocr. Unsupported formats are reported per file.
                 </p>
               </TabsContent>
             )}

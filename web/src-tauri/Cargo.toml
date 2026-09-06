@@ -47,6 +47,36 @@ scraper = "0.25"
 # which conflicts with this project's `time = "=0.3.44"` pin. Office/ODF
 # zip parts only ever need DEFLATE decompression, not entry timestamps.
 zip = { version = "8", default-features = false, features = ["deflate"] }
+tempfile = "3"
+anydoc = "0.2.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSDictionary",
+    "NSError",
+    "NSString",
+    "NSURL",
+] }
+objc2-vision = { version = "0.3", default-features = false, features = [
+    "VNObservation",
+    "VNRecognizeTextRequest",
+    "VNRequest",
+    "VNRequestHandler",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage",
+    "Storage_Streams",
+] }
+windows-future = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

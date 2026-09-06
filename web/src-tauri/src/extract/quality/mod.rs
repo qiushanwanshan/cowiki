@@ -76,14 +76,16 @@ fn suggested_fallback(format: SourceFormat, reasons: &[QualityReason]) -> Option
         return None;
     }
     match format {
-        SourceFormat::Pdf => Some(FallbackTarget::local(FallbackKind::PageOcr)),
+        SourceFormat::Pdf | SourceFormat::Image => {
+            Some(FallbackTarget::capability(FallbackKind::PageOcr, "ocr"))
+        }
         SourceFormat::Docx
         | SourceFormat::Odt
         | SourceFormat::Pptx
         | SourceFormat::Odp
         | SourceFormat::Xlsx
         | SourceFormat::Xls
-        | SourceFormat::Ods => Some(FallbackTarget::capability(FallbackKind::AnyDoc, "anydoc")),
+        | SourceFormat::Ods => Some(FallbackTarget::local(FallbackKind::AnyDoc)),
         SourceFormat::Html | SourceFormat::Url => {
             if reasons
                 .iter()

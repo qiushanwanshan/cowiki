@@ -38,11 +38,12 @@ impl SourceFormat {
     pub fn from_extension(extension: &str) -> Self {
         match extension {
             "pdf" => Self::Pdf,
-            "docx" => Self::Docx,
-            "xlsx" => Self::Xlsx,
+            "doc" | "docx" | "docm" => Self::Docx,
+            "rtf" | "epub" => Self::Text,
+            "ppt" | "pps" | "pot" | "pptx" | "pptm" | "ppsx" | "ppsm" => Self::Pptx,
+            "xlsx" | "xlsm" | "xlsb" => Self::Xlsx,
             "xls" => Self::Xls,
             "ods" => Self::Ods,
-            "pptx" => Self::Pptx,
             "odt" => Self::Odt,
             "odp" => Self::Odp,
             "html" | "htm" => Self::Html,
