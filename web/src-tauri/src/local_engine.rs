@@ -4683,25 +4683,31 @@ mod tests {
     }
 
     #[test]
-    fn image_ingest_preserves_asset_and_writes_non_bare_markdown() {
+    fn image_ingest_is_ocr_only_and_never_preserves_the_file() {
         let temp = tempfile::tempdir().unwrap();
         let engine = LocalEngine::open(&temp.path().join("metadata")).unwrap();
         let folder = temp.path().join("knowledge");
         std::fs::create_dir_all(&folder).unwrap();
         let space = engine.add_space("Knowledge", "knowledge", &folder).unwrap();
+        // Not a real image: no platform OCR provider can extract text from
+        // this, so the ingest must surface an error instead of storing the
+        // raw bytes.
         let image = temp.path().join("receipt.png");
         std::fs::write(&image, b"placeholder image bytes").unwrap();
 
         let outcome = engine
             .ingest_files(&space.slug, &[image.to_string_lossy().into_owned()])
             .unwrap();
-        let source = outcome[0].source.as_ref().unwrap();
-        let document =
-            std::fs::read_to_string(folder.join(".cowiki/sources").join(&source.filename)).unwrap();
-        assert!(document.contains("![receipt](../assets/"));
-        assert!(document.contains("Text recognition is pending"));
-        let assets = std::fs::read_dir(folder.join(".cowiki/assets")).unwrap();
-        assert_eq!(assets.count(), 1);
+        assert!(outcome[0].source.is_none());
+        let error = outcome[0].error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("OCR") || error.contains("decode") || error.contains("image"),
+            "unexpected error: {error}"
+        );
+        // The recognized text is the only artifact of an image import — the
+        // image itself is never copied into the space.
+        assert!(!folder.join(".cowiki/assets").exists());
+        assert!(engine.list_sources(&space.slug).unwrap().is_empty());
     }
 
     #[test]
@@ -4864,7 +4870,7 @@ mod tests {
 
         let good = temp.path().join("notes.txt");
         std::fs::write(&good, "Readable notes.").unwrap();
-        let unsupported = temp.path().join("archive.doc");
+        let unsupported = temp.path().join("archive.exe");
         std::fs::write(&unsupported, b"legacy binary format").unwrap();
 
         let outcomes = engine
