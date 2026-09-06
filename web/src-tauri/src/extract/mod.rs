@@ -15,6 +15,7 @@ mod adapters;
 mod attempt;
 mod contract;
 mod fetch;
+mod file;
 mod limits;
 mod quality;
 
@@ -36,17 +37,9 @@ pub use contract::{
 pub use quality::evaluate_quality;
 
 use std::path::Path;
-use std::time::Instant;
 
-use adapters::{
-    extract_docx, extract_html_file, extract_pdf, extract_slides, extract_spreadsheet,
-    extract_web_page, extract_zip_xml_part, AdapterOutput,
-};
-use limits::{
-    validate_archive_limits, validate_extracted_text, validate_file_size, MAX_ARCHIVE_ENTRIES,
-    MAX_ARCHIVE_ENTRY_BYTES, MAX_ARCHIVE_TOTAL_BYTES, MAX_EXTRACTED_TEXT_BYTES,
-    MAX_SOURCE_FILE_BYTES,
-};
+use adapters::extract_web_page;
+use limits::{validate_extracted_text, MAX_EXTRACTED_TEXT_BYTES};
 
 pub const BUILTIN_EXTRACTOR: &str = "builtin";
 pub const WEB_EXTRACTOR: &str = "readabilityrs+htmd";
@@ -55,7 +48,15 @@ pub const WEB_EXTRACTOR_VERSION: &str = "readabilityrs@0.1.4+htmd@0.5";
 pub const WEB_BODY_EXTRACTOR_VERSION: &str = "semantic-body@1+htmd@0.5";
 
 /// Binary formats this module knows how to convert to text.
-pub const BINARY_EXTENSIONS: &[&str] = &["pdf", "docx", "xlsx", "xls", "ods", "pptx", "odt", "odp"];
+pub const BINARY_EXTENSIONS: &[&str] = &[
+    "pdf", "doc", "docx", "docm", "rtf", "epub", "ppt", "pps", "pot", "pptx", "pptm", "ppsx",
+    "ppsm", "xlsx", "xls", "xlsm", "xlsb", "ods", "odt", "odp",
+];
+
+/// Raster images. Images are OCR'd on import through the OS-native provider
+/// (Vision on macOS, Windows.Media.Ocr on Windows); scanned-PDF OCR is not
+/// supported yet.
+pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "bmp"];
 
 /// Local HTML files go through the same static web extract path as URLs.
 pub const HTML_EXTENSIONS: &[&str] = &["html", "htm"];
@@ -71,6 +72,7 @@ pub const PLAIN_TEXT_EXTENSIONS: &[&str] = &[
 pub fn all_supported_extensions() -> Vec<&'static str> {
     BINARY_EXTENSIONS
         .iter()
+        .chain(IMAGE_EXTENSIONS)
         .chain(HTML_EXTENSIONS)
         .chain(PLAIN_TEXT_EXTENSIONS)
         .copied()
@@ -80,6 +82,7 @@ pub fn all_supported_extensions() -> Vec<&'static str> {
 pub fn is_supported(path: &Path) -> bool {
     extension_of(path).is_some_and(|extension| {
         BINARY_EXTENSIONS.contains(&extension.as_str())
+            || IMAGE_EXTENSIONS.contains(&extension.as_str())
             || HTML_EXTENSIONS.contains(&extension.as_str())
             || PLAIN_TEXT_EXTENSIONS.contains(&extension.as_str())
     })
@@ -109,68 +112,10 @@ pub fn read_source_file(path: &Path) -> Result<String, String> {
     Ok(extract_source(path)?.text)
 }
 
-/// Run the builtin adapters and return text plus the stats they can collect
-/// from the same walk. Does not write Source files.
+/// Run file adapters with AttemptChain fallbacks (builtin → AnyDoc). Images
+/// are OCR'd on import through the OS-native provider.
 pub fn extract_source(path: &Path) -> Result<ExtractResult, String> {
-    let extension = extension_of(path)
-        .ok_or_else(|| "file has no extension to identify its format".to_string())?;
-    validate_file_size(path, MAX_SOURCE_FILE_BYTES)?;
-    if HTML_EXTENSIONS.contains(&extension.as_str()) {
-        let html =
-            std::fs::read_to_string(path).map_err(|error| format!("cannot read file: {error}"))?;
-        validate_extracted_text(&html, MAX_EXTRACTED_TEXT_BYTES)?;
-        return extract_html_file(&html);
-    }
-    let started = Instant::now();
-    if matches!(
-        extension.as_str(),
-        "docx" | "xlsx" | "ods" | "pptx" | "odt" | "odp"
-    ) {
-        validate_archive_limits(
-            path,
-            MAX_ARCHIVE_ENTRY_BYTES,
-            MAX_ARCHIVE_TOTAL_BYTES,
-            MAX_ARCHIVE_ENTRIES,
-        )?;
-    }
-    let format = SourceFormat::from_extension(&extension);
-    let output = if PLAIN_TEXT_EXTENSIONS.contains(&extension.as_str()) {
-        let text =
-            std::fs::read_to_string(path).map_err(|error| format!("cannot read file: {error}"))?;
-        AdapterOutput::from_text(text)
-    } else {
-        match extension.as_str() {
-            "pdf" => extract_pdf(path)?,
-            "docx" => extract_docx(path)?,
-            "xlsx" | "xls" | "ods" => extract_spreadsheet(path)?,
-            "pptx" => extract_slides(path)?,
-            "odt" | "odp" => extract_zip_xml_part(path, "content.xml")?,
-            other => {
-                return Err(format!(
-                    "'.{other}' is not a supported source format (supported: {})",
-                    all_supported_extensions().join(", ")
-                ))
-            }
-        }
-    };
-    validate_extracted_text(&output.text, MAX_EXTRACTED_TEXT_BYTES)?;
-    let trimmed = output.text.trim();
-    if trimmed.is_empty() {
-        return Err("no extractable text found in this file".to_string());
-    }
-    let mut result = ExtractResult::from_adapter(
-        trimmed.to_string(),
-        format,
-        output.stats,
-        Provenance::local_fast(
-            BUILTIN_EXTRACTOR,
-            env!("CARGO_PKG_VERSION"),
-            started.elapsed().as_millis() as u64,
-        ),
-    );
-    let report = evaluate_quality(&result);
-    quality::attach_diagnostics(&mut result, &report);
-    Ok(result)
+    file::extract_source_file(path)
 }
 
 fn extension_of(path: &Path) -> Option<String> {
@@ -187,8 +132,8 @@ mod tests {
     #[test]
     fn rejects_unsupported_extensions_with_a_clear_message() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("legacy.doc");
-        std::fs::write(&path, b"not really a doc").unwrap();
+        let path = temp.path().join("legacy.bin");
+        std::fs::write(&path, b"not a known format").unwrap();
         let error = read_source_file(&path).unwrap_err();
         assert!(error.contains("not a supported source format"));
         assert!(!is_supported(&path));

@@ -4683,6 +4683,28 @@ mod tests {
     }
 
     #[test]
+    fn image_ingest_preserves_asset_and_writes_non_bare_markdown() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = LocalEngine::open(&temp.path().join("metadata")).unwrap();
+        let folder = temp.path().join("knowledge");
+        std::fs::create_dir_all(&folder).unwrap();
+        let space = engine.add_space("Knowledge", "knowledge", &folder).unwrap();
+        let image = temp.path().join("receipt.png");
+        std::fs::write(&image, b"placeholder image bytes").unwrap();
+
+        let outcome = engine
+            .ingest_files(&space.slug, &[image.to_string_lossy().into_owned()])
+            .unwrap();
+        let source = outcome[0].source.as_ref().unwrap();
+        let document =
+            std::fs::read_to_string(folder.join(".cowiki/sources").join(&source.filename)).unwrap();
+        assert!(document.contains("![receipt](../assets/"));
+        assert!(document.contains("Text recognition is pending"));
+        let assets = std::fs::read_dir(folder.join(".cowiki/assets")).unwrap();
+        assert_eq!(assets.count(), 1);
+    }
+
+    #[test]
     fn source_ingest_leaves_no_partial_temp_files() {
         let temp = tempfile::tempdir().unwrap();
         let engine = LocalEngine::open(&temp.path().join("metadata")).unwrap();
