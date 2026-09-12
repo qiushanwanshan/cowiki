@@ -1,4 +1,4 @@
-import { useMemo, useState, type ComponentPropsWithoutRef } from 'react';
+import { createElement, useMemo, useState, type ComponentPropsWithoutRef } from 'react';
 import { Code2, Eye } from 'lucide-react';
 import type { Components } from 'react-markdown';
 import { C, fonts } from '../lib/design';
@@ -91,7 +91,16 @@ function HtmlAwarePre({ children, node, ...props }: PreProps) {
   return <pre {...props}>{children}</pre>;
 }
 
-export const htmlMarkdownComponents: Components = {
-  code: HtmlAwareCode,
-  pre: HtmlAwarePre,
-};
+export function withHtmlMarkdownComponents(components: Components = {}): Components {
+  return {
+    ...components,
+    code: (props) => isHtmlCodeLanguage(props.className) || !components.code
+      ? <HtmlAwareCode {...props} />
+      : createElement(components.code, props),
+    pre: (props) => {
+      const hast = props.node as { children?: Array<{ properties?: { className?: string[] } }> } | undefined;
+      const html = isHtmlCodeLanguage(hast?.children?.[0]?.properties?.className?.join(' '));
+      return html || !components.pre ? <HtmlAwarePre {...props} /> : createElement(components.pre, props);
+    },
+  };
+}
