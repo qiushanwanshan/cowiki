@@ -1,7 +1,21 @@
 import { parsePatch } from 'diff';
 
 import type { DiffHunk, DiffLine, FileDiff } from '../api';
+import { CloudApiError } from './client.ts';
 import type { CloudPullRequestDiff } from './client';
+
+export function cloudMergeErrorMessage(error: unknown): string {
+  if (error instanceof CloudApiError && error.code === 'stale_head') {
+    return 'This pull request changed. Review the latest head before merging.';
+  }
+  if (error instanceof CloudApiError && error.code === 'merge_conflict') {
+    const paths = error.conflicts?.join(', ');
+    return paths
+      ? `This pull request conflicts with the latest Cloud main in: ${paths}.`
+      : 'This pull request conflicts with the latest Cloud main.';
+  }
+  return error instanceof Error ? error.message : 'Merge failed.';
+}
 
 export function cloudDiffToFileDiffs(diff: CloudPullRequestDiff): FileDiff[] {
   const parsedByPath = new Map(
