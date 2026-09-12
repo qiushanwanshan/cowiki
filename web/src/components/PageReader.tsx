@@ -3,6 +3,8 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { C } from '@/lib/design';
 import { PageByline } from './PageByline';
+import { withHtmlMarkdownComponents } from './HtmlView';
+import { useMemo } from 'react';
 
 interface PageReaderProps {
   body: string;
@@ -28,6 +30,7 @@ export function PageReader({
   missingMessage,
   aside,
 }: PageReaderProps) {
+  const components = useMemo(() => withHtmlMarkdownComponents(markdownComponents), [markdownComponents]);
   return (
     <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'stretch' }}>
       <article
@@ -55,7 +58,10 @@ export function PageReader({
         ) : (
           <>
             {byline && <PageByline name={byline.name} editedAt={byline.editedAt} />}
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={components}
+            >
               {body}
             </ReactMarkdown>
           </>
