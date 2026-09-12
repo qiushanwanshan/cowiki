@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import {
   Compass,
   Pencil, FolderOpen, PanelLeft, Bot, HardDrive, FolderInput, Cloud, UserPlus, ChevronLeft,
+  ExternalLink,
 } from 'lucide-react';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -50,12 +51,15 @@ import { PageEditor, type PageEditorHandle } from '../components/PageEditor';
 import { PageReader } from '../components/PageReader';
 import { TransferDialog } from '../components/TransferDialog';
 import { NotificationsPage } from '../components/notifications/NotificationsPage';
+import { CloudNotificationsPage } from '../cloud/CloudNotificationsPage';
 import { notificationUnreadCount } from '../api';
 import { CommentsProvider, CommentsPanel, CommentsHeaderToggle, commentMarkdownComponents } from '../components/PageCommentsLayer';
 import { C } from '@/lib/design';
 import { apiOrigin, isDesktopClient } from '@/runtime';
 import { normalizeCloudSession } from '@/cloud/session';
 import { CloudSpaceDialog } from '@/components/cloud/CloudSpaceDialog';
+import { WorkspaceContextBadge } from '@/components/layout/WorkspaceContextBadge';
+import { getCloudStatus, type CloudSyncState } from '@/local-api';
 import { chooseLocalSpaceDirectory, localSpaceIdentityFromPath } from '@/local-space';
 import {
   AgentTerminalPanel,
@@ -79,10 +83,14 @@ import {
   saveClientSettings,
   type DefaultAgent,
 } from '@/lib/client-settings';
-import { splitSystemFrontmatter } from '@/lib/page-frontmatter';
+import { sourceUrlFromDocument, splitSystemFrontmatter } from '@/lib/page-frontmatter';
 import { pageLineage, sourceFilename } from '@/lib/page-lineage';
 import { sourceOrganizationTask } from '@/lib/source-ingest';
 import { resolveWorkspaceSwitchTarget } from '@/lib/workspace-navigation';
+import { workspaceContextStatus } from '@/lib/workspace-context';
+import { createCloudClient } from '@/cloud/client';
+import { cloudPageCommentStore, desktopPageCommentStore } from '@/lib/page-comment-store';
+import { openExternalUrl } from '@/external-links';
 
 type ActiveView =
   | { kind: 'page'; slug: string; path?: string; content: PageFull | null }
@@ -147,6 +155,11 @@ export function MainLayout() {
   const [versionSelection, setVersionSelection] = useState<VersionSelection>({ kind: 'working' });
   const [openAgentChanges, setOpenAgentChanges] = useState<AgentChange[]>([]);
   const [workingDiffs, setWorkingDiffs] = useState<FileDiff[]>([]);
+  const [workingDiffsSpaceSlug, setWorkingDiffsSpaceSlug] = useState<string | null>(null);
+  const [desktopCloudStatus, setDesktopCloudStatus] = useState<{
+    spaceSlug: string;
+    state: CloudSyncState | 'unavailable';
+  } | null>(null);
   const [sidebarLayout, setSidebarLayout] = useState(() => loadSidebarLayout(window.localStorage));
   const [resizingSidebar, setResizingSidebar] = useState(false);
   const sidebarResizeStart = useRef({ pointerX: 0, width: sidebarLayout.width });
@@ -281,6 +294,26 @@ export function MainLayout() {
       return null;
     }
   }, [auth]);
+  const cloudClient = useMemo(
+    () => cloudSession ? createCloudClient(cloudSession) : null,
+    [cloudSession],
+  );
+  const [commentCloudSpace, setCommentCloudSpace] = useState<{ slug: string; id: string | null } | null>(null);
+
+  useEffect(() => {
+    if (!desktop || !activeWorkspace) {
+      setCommentCloudSpace(null);
+      return;
+    }
+    let active = true;
+    void getCloudStatus(activeWorkspace.slug)
+      .then((status) => {
+        if (!active) return;
+        setCommentCloudSpace({ slug: activeWorkspace.slug, id: status.cloudSpaceId ?? null });
+      })
+      .catch(() => { if (active) setCommentCloudSpace(null); });
+    return () => { active = false; };
+  }, [activeWorkspace, cloudSession, desktop, reviewRefreshKey]);
 
   // Load pages for a space.
   const loadSpacePages = useCallback(async (ws: Workspace) => {
@@ -432,6 +465,7 @@ export function MainLayout() {
       const task = window.setTimeout(() => {
         setOpenAgentChanges([]);
         setWorkingDiffs([]);
+        setWorkingDiffsSpaceSlug(null);
         setVersionSelection({ kind: 'working' });
       }, 0);
       return () => window.clearTimeout(task);
@@ -445,6 +479,7 @@ export function MainLayout() {
       const openChanges = changes.filter((change) => change.status === 'open');
       setOpenAgentChanges(openChanges);
       setWorkingDiffs(diffs);
+      setWorkingDiffsSpaceSlug(activeWorkspace.slug);
       setVersionSelection((current) => (
         current.kind === 'agent' && !openChanges.some((change) => change.id === current.changeId)
           ? { kind: 'working' }
@@ -454,8 +489,26 @@ export function MainLayout() {
       if (cancelled) return;
       setOpenAgentChanges([]);
       setWorkingDiffs([]);
+      setWorkingDiffsSpaceSlug(activeWorkspace.slug);
       setVersionSelection({ kind: 'working' });
     });
+    return () => { cancelled = true; };
+  }, [activeWorkspace?.localPath, activeWorkspace?.slug, desktop, reviewRefreshKey]);
+
+  useEffect(() => {
+    if (!desktop || !activeWorkspace?.localPath) {
+      const task = window.setTimeout(() => setDesktopCloudStatus(null), 0);
+      return () => window.clearTimeout(task);
+    }
+    let cancelled = false;
+    const spaceSlug = activeWorkspace.slug;
+    getCloudStatus(spaceSlug)
+      .then((status) => {
+        if (!cancelled) setDesktopCloudStatus({ spaceSlug, state: status.state });
+      })
+      .catch(() => {
+        if (!cancelled) setDesktopCloudStatus({ spaceSlug, state: 'unavailable' });
+      });
     return () => { cancelled = true; };
   }, [activeWorkspace?.localPath, activeWorkspace?.slug, desktop, reviewRefreshKey]);
 
@@ -749,8 +802,25 @@ export function MainLayout() {
   // Page-view comment context: active only when reading (not editing) a page.
   const pageView = activeView?.kind === 'page' ? activeView : null;
   const commentsActive = !!pageView?.content && !editingPage;
-  const commentPageSlug = commentsActive && pageView ? pageView.slug : '';
+  const commentPageSlug = commentsActive && pageView
+    ? (pageView.path ?? pageView.content?.path ?? '')
+    : '';
   const commentSource = commentsActive && pageView?.content ? renderBody(pageView.content.body) : '';
+  const commentStore = useMemo(() => {
+    if (!activeWorkspace) return null;
+    if (desktop) {
+      return desktopPageCommentStore(activeWorkspace.slug, commentCloudSpace, cloudClient, cloudSession);
+    }
+    if (cloudClient && cloudSession) {
+      return cloudPageCommentStore(
+        cloudClient,
+        activeWorkspace.id,
+        cloudSession.userId,
+        cloudSession.userName,
+      );
+    }
+    return null;
+  }, [activeWorkspace, cloudClient, cloudSession, commentCloudSpace, desktop]);
 
   // Execute a pending rename/delete from the tree menus.
   const handlePathOp = async () => {
@@ -864,17 +934,30 @@ export function MainLayout() {
 
   const personal = activeWorkspace ? isPersonalSpace(activeWorkspace) : false;
   const isOwner = activeWorkspace?.role === 'owner';
+  const activeWorkingDiffs = workingDiffsSpaceSlug === activeWorkspace?.slug ? workingDiffs : [];
+  const activeCloudState = desktopCloudStatus && desktopCloudStatus.spaceSlug === activeWorkspace?.slug
+    ? desktopCloudStatus.state
+    : null;
+  const workspaceContext = workspaceContextStatus({
+    desktop,
+    state: activeCloudState,
+    hasLocalChanges: activeWorkingDiffs.length > 0,
+    statusKnown: !desktop || !!activeCloudState,
+  });
 
   // Determine active page/source for panel highlight
   const currentActivePage = activeView?.kind === 'page' ? activeView.slug : null;
   const currentActiveSource = activeView?.kind === 'source' ? activeView.filename : null;
+  const activeSourceUrl = activeView?.kind === 'source' && activeView.content
+    ? sourceUrlFromDocument(activeView.content.content)
+    : null;
   const selectedAgentChange = versionSelection.kind === 'agent'
     ? openAgentChanges.find((change) => change.id === versionSelection.changeId)
     : undefined;
   const activePagePath = activeView?.kind === 'page'
     ? (activeView.path || conceptPath(activeView.slug))
     : null;
-  const workingPageDiff = activePagePath ? findDiffForPath(workingDiffs, activePagePath) : undefined;
+  const workingPageDiff = activePagePath ? findDiffForPath(activeWorkingDiffs, activePagePath) : undefined;
   const agentPageDiff = activePagePath && selectedAgentChange
     ? findDiffForPath(selectedAgentChange.diffs, activePagePath)
     : undefined;
@@ -1017,13 +1100,10 @@ export function MainLayout() {
           {/* Main Content Area */}
           <main style={{ flex: 1, minWidth: 0, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
             <CommentsProvider
-              // Local Spaces never contact CoWiki Cloud implicitly. Comments
-              // become available only after the Space gains Cloud capability.
-              workspaceSlug={desktop ? '' : (activeWorkspace?.slug ?? '')}
+              store={commentStore}
               pageSlug={commentPageSlug}
               source={commentSource}
               articleRef={articleRef}
-              currentUserId={auth?.id}
             >
             {/* Top bar: breadcrumb + actions */}
             <ContentHeader>
@@ -1113,8 +1193,9 @@ export function MainLayout() {
               <ContentHeaderActions>
 
                 {desktop && activeWorkspace?.localPath && (
-                  <button
-                    type="button"
+                  <WorkspaceContextBadge
+                    context={workspaceContext}
+                    connected={workspaceContext.kind === 'linked'}
                     onClick={() => {
                       if (!cloudSession) {
                         navigate('/login');
@@ -1123,10 +1204,7 @@ export function MainLayout() {
                       setCloudDialogOpen(true);
                     }}
                     style={headerBtnStyle}
-                    title={cloudSession ? 'Publish, sync, or submit this Space' : 'Publish to Cloud'}
-                  >
-                    <Cloud size={14} /> {cloudSession ? 'Cloud' : 'Publish to Cloud'}
-                  </button>
+                  />
                 )}
 
                 {desktop && activeWorkspace?.localPath && !editingPage && (
@@ -1211,7 +1289,15 @@ export function MainLayout() {
             <div style={{ flex: 1, padding: '36px 56px 56px', position: 'relative' }}>
               {/* Notifications (cross-space inbox) */}
               {activeView?.kind === 'notifications' ? (
-                <NotificationsPage onUnreadChange={setNotifUnread} />
+                cloudClient && cloudSession ? (
+                  <CloudNotificationsPage
+                    client={cloudClient}
+                    session={cloudSession}
+                    onSignOut={handleLogout}
+                    embedded
+                    onUnreadChange={setNotifUnread}
+                  />
+                ) : <NotificationsPage onUnreadChange={setNotifUnread} />
 
               /* Review detail */
               ) : activeView?.kind === 'review-detail' ? (
@@ -1283,13 +1369,24 @@ export function MainLayout() {
               /* Source view */
               ) : activeView?.kind === 'source' && activeView.content ? (
                 <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 16 }}>
                     <span style={{
                       padding: '2px 10px', fontSize: 11, borderRadius: 12,
                       background: C.blueSoft, color: C.blue, fontWeight: 500,
                     }}>
                       Source File
                     </span>
+                    {activeSourceUrl && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => { void openExternalUrl(activeSourceUrl); }}
+                      >
+                        <ExternalLink className="size-4" />
+                        View original
+                      </Button>
+                    )}
                   </div>
                   <article>
                     <h1 className="page-title page-title--compact source-title">
@@ -1335,6 +1432,7 @@ export function MainLayout() {
                   // panel is flush to the right edge and full height with its own
                   // scroll. Opening it shrinks the doc from the right only.
                   <PageReader
+                    key={(activeWorkspace?.slug ?? '') + ':' + (activeView.path ?? activeView.slug) + ':' + versionSelection.kind}
                     articleRef={articleRef}
                     body={renderBody(viewedPageBody)}
                     lineage={pageLineage(
@@ -1344,6 +1442,9 @@ export function MainLayout() {
                     onOpenSource={(path) => {
                       if (activeWorkspace) void selectSource(activeWorkspace, sourceFilename(path));
                     }}
+                    loadSource={versionSelection.kind === 'working' && activeWorkspace
+                      ? (path) => getSource(activeWorkspace.slug, sourceFilename(path))
+                      : undefined}
                     markdownComponents={commentMarkdownComponents}
                     byline={versionSelection.kind === 'working' ? {
                       name: activeView.content.edited_by,
@@ -1590,7 +1691,7 @@ export function MainLayout() {
           onOpenChange={setCloudDialogOpen}
           space={activeWorkspace ? { name: activeWorkspace.name, slug: activeWorkspace.slug } : null}
           session={cloudSession}
-          hasLocalChanges={workingDiffs.length > 0}
+          hasLocalChanges={activeWorkingDiffs.length > 0}
           onChanged={() => setReviewRefreshKey((key) => key + 1)}
         />
       )}

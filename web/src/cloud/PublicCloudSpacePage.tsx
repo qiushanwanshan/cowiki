@@ -128,6 +128,7 @@ export function PublicCloudSpacePage() {
         <div className="relative min-h-0 flex-1">
           {documentPath && content?.path === documentPath ? (
             <PageReader
+              key={slug + ':' + content.path + ':' + content.oid}
               body={splitSystemFrontmatter(content.content).body}
               lineage={pageLineage(content.content, content.provenance)}
             />

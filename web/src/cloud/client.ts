@@ -75,6 +75,54 @@ export interface CloudMember {
   role: CloudRole;
 }
 
+export interface CloudComment {
+  id: string;
+  pagePath: string;
+  userId: string;
+  userHandle: string;
+  userName: string;
+  userAvatarUrl: string | null;
+  contentHash: string | null;
+  startLine: number | null;
+  endLine: number | null;
+  body: string;
+  parentId: string | null;
+  resolved: boolean;
+  createdAt: string | number[];
+  updatedAt: string | number[];
+}
+
+export interface CloudCommentsResponse {
+  comments: CloudComment[];
+  snapshots: Array<{ contentHash: string; source: string }>;
+}
+
+export interface CreateCloudComment {
+  path: string;
+  body: string;
+  source?: string;
+  startLine?: number;
+  endLine?: number;
+  parentId?: string;
+}
+
+export interface CloudNotification {
+  id: string;
+  kind: 'mention';
+  spaceId: string;
+  spaceName: string;
+  spaceSlug: string;
+  commentId: string;
+  pagePath: string;
+  commentBody: string;
+  actorId: string;
+  actorHandle: string;
+  actorName: string;
+  actorAvatarUrl: string | null;
+  read: boolean;
+  createdAt: string;
+}
+
 export type CloudInvitableRole = 'editor' | 'viewer';
 
 export interface CloudInvitationPreview {
@@ -125,6 +173,8 @@ export interface CloudPullRequestDiff {
     status: string;
     additions: number;
     deletions: number;
+    oldContent?: string | null;
+    newContent?: string | null;
   }>;
   patch: string;
 }
@@ -132,12 +182,19 @@ export interface CloudPullRequestDiff {
 export class CloudApiError extends Error {
   readonly status: number;
   readonly code: string | null;
+  readonly conflicts: string[] | null;
 
-  constructor(status: number, message: string, code: string | null = null) {
+  constructor(
+    status: number,
+    message: string,
+    code: string | null = null,
+    conflicts: string[] | null = null,
+  ) {
     super(message);
     this.name = 'CloudApiError';
     this.status = status;
     this.code = code;
+    this.conflicts = conflicts;
   }
 }
 
@@ -157,6 +214,14 @@ export interface CloudClient {
   listMembers(spaceId: string): Promise<CloudMember[]>;
   setMember(spaceId: string, handle: string, role: CloudRole): Promise<CloudMember>;
   removeMember(spaceId: string, memberId: string): Promise<void>;
+  listComments(spaceId: string, path: string): Promise<CloudCommentsResponse>;
+  createComment(spaceId: string, input: CreateCloudComment): Promise<CloudComment>;
+  setCommentResolved(spaceId: string, commentId: string, resolved: boolean): Promise<CloudComment>;
+  deleteComment(spaceId: string, commentId: string): Promise<void>;
+  listNotifications(): Promise<CloudNotification[]>;
+  notificationUnreadCount(): Promise<{ count: number }>;
+  setNotificationRead(notificationId: string, read: boolean): Promise<void>;
+  markAllNotificationsRead(): Promise<void>;
   acceptInvitation(token: string): Promise<CloudSpace>;
   listInvitations(spaceId: string): Promise<CloudInvitation[]>;
   createInvitation(
@@ -188,11 +253,15 @@ export function createCloudClient(
       const payload = await response.json().catch(() => null) as {
         error?: string;
         code?: string;
+        conflicts?: unknown;
       } | null;
       throw new CloudApiError(
         response.status,
         payload?.error || `Cloud request failed (${response.status})`,
         payload?.code ?? null,
+        Array.isArray(payload?.conflicts)
+          ? payload.conflicts.filter((path): path is string => typeof path === 'string')
+          : null,
       );
     }
     if (response.status === 204) return undefined as T;
@@ -244,6 +313,29 @@ export function createCloudClient(
       `${spacePath(spaceId, '/members')}/${encodeURIComponent(memberId)}`,
       { method: 'DELETE' },
     ),
+    listComments: (spaceId, path) => {
+      const query = new URLSearchParams({ path });
+      return request(`${spacePath(spaceId, '/comments')}?${query}`);
+    },
+    createComment: (spaceId, input) => request(spacePath(spaceId, '/comments'), {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+    setCommentResolved: (spaceId, commentId, resolved) => request(
+      `${spacePath(spaceId, '/comments')}/${encodeURIComponent(commentId)}`,
+      { method: 'PATCH', body: JSON.stringify({ resolved }) },
+    ),
+    deleteComment: (spaceId, commentId) => request(
+      `${spacePath(spaceId, '/comments')}/${encodeURIComponent(commentId)}`,
+      { method: 'DELETE' },
+    ),
+    listNotifications: () => request('/api/notifications'),
+    notificationUnreadCount: () => request('/api/notifications/unread-count'),
+    setNotificationRead: (notificationId, read) => request(
+      `/api/notifications/${encodeURIComponent(notificationId)}`,
+      { method: 'PATCH', body: JSON.stringify({ read }) },
+    ),
+    markAllNotificationsRead: () => request('/api/notifications/read-all', { method: 'POST' }),
     acceptInvitation: (token) => request(
       `/api/invitations/${encodeURIComponent(token)}/accept`,
       { method: 'POST' },

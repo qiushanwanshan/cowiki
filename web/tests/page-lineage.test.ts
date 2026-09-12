@@ -59,4 +59,5 @@ test('Source provenance exposes only safe original web URLs', () => {
     'https://example.com/article',
   );
   assert.equal(sourceOriginalUrl('---\nsource_url: javascript:alert(1)\n---\n'), null);
+  assert.equal(sourceOriginalUrl('---\nsource_url: https://user:secret@example.com\n---\n'), null);
 });

@@ -43,22 +43,7 @@ export function sourceFilename(path: string): string {
   return path.replace(/^\.cowiki\/sources\//, '');
 }
 
-export function sourceOriginalUrl(document: string): string | null {
-  const match = document.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  const value = match?.[1]
-    .split(/\r?\n/)
-    .find((line) => /^source_url\s*:/.test(line))
-    ?.replace(/^source_url\s*:\s*/, '')
-    .trim()
-    .replace(/^['"]|['"]$/g, '');
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null;
-  } catch {
-    return null;
-  }
-}
+export { sourceUrlFromDocument as sourceOriginalUrl } from './page-frontmatter.ts';
 
 function frontmatterSources(document: string): string[] {
   const match = document.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);

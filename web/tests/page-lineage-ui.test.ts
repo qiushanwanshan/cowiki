@@ -28,11 +28,12 @@ test('page lineage stays collapsed after the document until requested', async ()
     },
   }));
 
-  assert.match(html, /<details[^>]*aria-label="Page lineage"/);
-  assert.doesNotMatch(html, /<details[^>]*\sopen(?:=|\s|>)/);
-  assert.match(html, /<summary[^>]*>.*Lineage.*1 source/s);
+  assert.match(html, /aria-expanded="false"/);
+  assert.doesNotMatch(html, /<aside/);
+  assert.match(html, /Sources &amp; records/);
+  assert.match(html, /1 source/);
   assert.ok(
-    html.indexOf('Durable knowledge') < html.indexOf('aria-label="Page lineage"'),
+    html.indexOf('Durable knowledge') < html.indexOf('Sources &amp; records'),
     'lineage belongs after the document instead of above its title',
   );
 });
