@@ -19,7 +19,7 @@ export function cloudMergeErrorMessage(error: unknown): string {
 
 export function cloudDiffToFileDiffs(diff: CloudPullRequestDiff): FileDiff[] {
   const parsedByPath = new Map(
-    parsePatch(diff.patch).map((file) => [cleanPath(file.newFileName ?? file.oldFileName), file]),
+    parsePatch(diff.patch).map((file) => [cleanPath(file.newFileName) || cleanPath(file.oldFileName), file]),
   );
 
   return diff.files.map((file) => {
@@ -27,8 +27,8 @@ export function cloudDiffToFileDiffs(diff: CloudPullRequestDiff): FileDiff[] {
     const [oldContent, newContent] = contentPresence(file.status);
     return {
       path: file.path,
-      old_content: oldContent,
-      new_content: newContent,
+      old_content: file.oldContent === undefined ? oldContent : file.oldContent,
+      new_content: file.newContent === undefined ? newContent : file.newContent,
       hunks: parsed?.hunks.map(toDiffHunk) ?? [],
       additions: file.additions,
       deletions: file.deletions,
