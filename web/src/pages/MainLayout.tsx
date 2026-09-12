@@ -51,6 +51,7 @@ import { PageEditor, type PageEditorHandle } from '../components/PageEditor';
 import { PageReader } from '../components/PageReader';
 import { TransferDialog } from '../components/TransferDialog';
 import { NotificationsPage } from '../components/notifications/NotificationsPage';
+import { CloudNotificationsPage } from '../cloud/CloudNotificationsPage';
 import { notificationUnreadCount } from '../api';
 import { CommentsProvider, CommentsPanel, CommentsHeaderToggle, commentMarkdownComponents } from '../components/PageCommentsLayer';
 import { C } from '@/lib/design';
@@ -83,6 +84,9 @@ import {
 import { sourceUrlFromDocument, splitSystemFrontmatter } from '@/lib/page-frontmatter';
 import { sourceOrganizationTask } from '@/lib/source-ingest';
 import { resolveWorkspaceSwitchTarget } from '@/lib/workspace-navigation';
+import { getCloudStatus } from '@/local-api';
+import { createCloudClient } from '@/cloud/client';
+import { cloudPageCommentStore, desktopPageCommentStore } from '@/lib/page-comment-store';
 import { openExternalUrl } from '@/external-links';
 
 type ActiveView =
@@ -282,6 +286,26 @@ export function MainLayout() {
       return null;
     }
   }, [auth]);
+  const cloudClient = useMemo(
+    () => cloudSession ? createCloudClient(cloudSession) : null,
+    [cloudSession],
+  );
+  const [commentCloudSpace, setCommentCloudSpace] = useState<{ slug: string; id: string | null } | null>(null);
+
+  useEffect(() => {
+    if (!desktop || !activeWorkspace) {
+      setCommentCloudSpace(null);
+      return;
+    }
+    let active = true;
+    void getCloudStatus(activeWorkspace.slug)
+      .then((status) => {
+        if (!active) return;
+        setCommentCloudSpace({ slug: activeWorkspace.slug, id: status.cloudSpaceId ?? null });
+      })
+      .catch(() => { if (active) setCommentCloudSpace(null); });
+    return () => { active = false; };
+  }, [activeWorkspace, cloudSession, desktop, reviewRefreshKey]);
 
   // Load pages for a space.
   const loadSpacePages = useCallback(async (ws: Workspace) => {
@@ -750,8 +774,25 @@ export function MainLayout() {
   // Page-view comment context: active only when reading (not editing) a page.
   const pageView = activeView?.kind === 'page' ? activeView : null;
   const commentsActive = !!pageView?.content && !editingPage;
-  const commentPageSlug = commentsActive && pageView ? pageView.slug : '';
+  const commentPageSlug = commentsActive && pageView
+    ? (pageView.path ?? pageView.content?.path ?? '')
+    : '';
   const commentSource = commentsActive && pageView?.content ? renderBody(pageView.content.body) : '';
+  const commentStore = useMemo(() => {
+    if (!activeWorkspace) return null;
+    if (desktop) {
+      return desktopPageCommentStore(activeWorkspace.slug, commentCloudSpace, cloudClient, cloudSession);
+    }
+    if (cloudClient && cloudSession) {
+      return cloudPageCommentStore(
+        cloudClient,
+        activeWorkspace.id,
+        cloudSession.userId,
+        cloudSession.userName,
+      );
+    }
+    return null;
+  }, [activeWorkspace, cloudClient, cloudSession, commentCloudSpace, desktop]);
 
   // Execute a pending rename/delete from the tree menus.
   const handlePathOp = async () => {
@@ -1021,13 +1062,10 @@ export function MainLayout() {
           {/* Main Content Area */}
           <main style={{ flex: 1, minWidth: 0, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
             <CommentsProvider
-              // Local Spaces never contact CoWiki Cloud implicitly. Comments
-              // become available only after the Space gains Cloud capability.
-              workspaceSlug={desktop ? '' : (activeWorkspace?.slug ?? '')}
+              store={commentStore}
               pageSlug={commentPageSlug}
               source={commentSource}
               articleRef={articleRef}
-              currentUserId={auth?.id}
             >
             {/* Top bar: breadcrumb + actions */}
             <ContentHeader>
@@ -1215,7 +1253,15 @@ export function MainLayout() {
             <div style={{ flex: 1, padding: '36px 56px 56px', position: 'relative' }}>
               {/* Notifications (cross-space inbox) */}
               {activeView?.kind === 'notifications' ? (
-                <NotificationsPage onUnreadChange={setNotifUnread} />
+                cloudClient && cloudSession ? (
+                  <CloudNotificationsPage
+                    client={cloudClient}
+                    session={cloudSession}
+                    onSignOut={handleLogout}
+                    embedded
+                    onUnreadChange={setNotifUnread}
+                  />
+                ) : <NotificationsPage onUnreadChange={setNotifUnread} />
 
               /* Review detail */
               ) : activeView?.kind === 'review-detail' ? (
