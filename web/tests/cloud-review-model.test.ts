@@ -7,13 +7,41 @@ import {
   cloudMergeErrorMessage,
 } from '../src/cloud/cloud-review-model.ts';
 
+test('deleted Markdown keeps its source diff as well as its complete before version', () => {
+  const [file] = cloudDiffToFileDiffs({
+    baseOid: 'base', headOid: 'head',
+    files: [{ path: 'removed.md', status: 'deleted', additions: 0, deletions: 1,
+      oldContent: '# Removed\n', newContent: null }],
+    patch: 'diff --git a/removed.md b/removed.md\ndeleted file mode 100644\n--- a/removed.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-# Removed\n',
+  });
+  assert.deepEqual(file.hunks[0]?.lines, [
+    { kind: 'del', old_line: 1, new_line: null, text: '# Removed' },
+  ]);
+  assert.equal(file.old_content, '# Removed\n');
+  assert.equal(file.new_content, null);
+});
+
 test('Cloud unified patches adapt to the shared client DiffView model', () => {
   const diffs = cloudDiffToFileDiffs({
     baseOid: 'base',
     headOid: 'head',
     files: [
-      { path: 'index.md', status: 'modified', additions: 2, deletions: 1 },
-      { path: 'new.md', status: 'added', additions: 1, deletions: 0 },
+      {
+        path: 'index.md',
+        status: 'modified',
+        additions: 2,
+        deletions: 1,
+        oldContent: '# Title\n\nOld\n',
+        newContent: '# Title\n\nNew\nMore\n',
+      },
+      {
+        path: 'new.md',
+        status: 'added',
+        additions: 1,
+        deletions: 0,
+        oldContent: null,
+        newContent: 'Hello\n',
+      },
     ],
     patch: [
       'diff --git a/index.md b/index.md',
@@ -43,10 +71,10 @@ test('Cloud unified patches adapt to the shared client DiffView model', () => {
     { kind: 'add', old_line: null, new_line: 2, text: 'New' },
     { kind: 'add', old_line: null, new_line: 3, text: 'More' },
   ]);
-  assert.equal(diffs[0]?.old_content, '');
-  assert.equal(diffs[0]?.new_content, '');
+  assert.equal(diffs[0]?.old_content, '# Title\n\nOld\n');
+  assert.equal(diffs[0]?.new_content, '# Title\n\nNew\nMore\n');
   assert.equal(diffs[1]?.old_content, null);
-  assert.equal(diffs[1]?.new_content, '');
+  assert.equal(diffs[1]?.new_content, 'Hello\n');
 });
 
 test('Cloud merge failures distinguish stale heads from real file conflicts', () => {
