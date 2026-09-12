@@ -736,8 +736,9 @@ impl LocalEngine {
     ) -> Result<SourceItem, String> {
         let relative = okf::source_storage_path(requested_filename)?;
         let mut candidate = checked_space_path(&space.local_path, &relative)?;
+        let source_url = web_snapshot.map(|snapshot| snapshot.source_url.as_str());
         if candidate.exists() {
-            if content_hash.is_some_and(|hash| source_hash_matches(&candidate, hash)) {
+            if content_hash.is_some_and(|hash| source_hash_matches(&candidate, hash, source_url)) {
                 return source_item_for_path(space, &candidate);
             }
 
@@ -755,7 +756,7 @@ impl LocalEngine {
                         found = Some(next);
                         break;
                     }
-                    if source_hash_matches(&next, hash) {
+                    if source_hash_matches(&next, hash, source_url) {
                         return source_item_for_path(space, &next);
                     }
                 }
@@ -2119,14 +2120,13 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn source_hash_matches(path: &Path, expected_hash: &str) -> bool {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|existing| {
-            frontmatter_field(&existing, "source_hash")
-                .or_else(|| frontmatter_field(&existing, "content_hash"))
-        })
-        .is_some_and(|existing_hash| existing_hash == expected_hash)
+fn source_hash_matches(path: &Path, expected_hash: &str, expected_url: Option<&str>) -> bool {
+    std::fs::read_to_string(path).ok().is_some_and(|existing| {
+        let hash = frontmatter_field(&existing, "source_hash")
+            .or_else(|| frontmatter_field(&existing, "content_hash"));
+        hash.as_deref() == Some(expected_hash)
+            && frontmatter_field(&existing, "source_url").as_deref() == expected_url
+    })
 }
 
 fn source_item_for_path(space: &Space, path: &Path) -> Result<SourceItem, String> {
@@ -4198,6 +4198,63 @@ mod tests {
             .any(|diff| diff.path == format!(".cowiki/sources/{}", item.filename)));
         assert!(engine.submit(&space.slug, &[]).unwrap().committed);
         assert!(!engine.has_uncommitted_changes(&space.slug).unwrap());
+    }
+
+    #[test]
+    fn web_sources_with_identical_text_keep_distinct_origin_urls() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = LocalEngine::open(&temp.path().join("metadata")).unwrap();
+        let folder = temp.path().join("knowledge");
+        std::fs::create_dir_all(&folder).unwrap();
+        let space = engine.add_space("Knowledge", "knowledge", &folder).unwrap();
+        let mut snapshot = crate::web_source::WebSourceSnapshot {
+            title: "Same title".into(),
+            source_url: "https://one.example/article".into(),
+            captured_at: "2026-09-12T00:00:00Z".into(),
+            markdown: "# Same text".into(),
+        };
+        let hash = super::sha256_bytes(snapshot.markdown.as_bytes());
+        let first = engine
+            .write_source_document(
+                &space,
+                &snapshot.title,
+                &snapshot.title,
+                &snapshot.markdown,
+                Some(&hash),
+                Some(&snapshot),
+            )
+            .unwrap();
+        snapshot.source_url = "https://two.example/article".into();
+        let second = engine
+            .write_source_document(
+                &space,
+                &snapshot.title,
+                &snapshot.title,
+                &snapshot.markdown,
+                Some(&hash),
+                Some(&snapshot),
+            )
+            .unwrap();
+        assert_ne!(
+            first.filename, second.filename,
+            "different origins must not reuse another source's provenance"
+        );
+        assert!(engine
+            .get_source(&space.slug, &second.filename)
+            .unwrap()
+            .content
+            .contains("https://two.example/article"));
+        let repeated = engine
+            .write_source_document(
+                &space,
+                &snapshot.title,
+                &snapshot.title,
+                &snapshot.markdown,
+                Some(&hash),
+                Some(&snapshot),
+            )
+            .unwrap();
+        assert_eq!(second.filename, repeated.filename);
     }
 
     #[test]
