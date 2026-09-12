@@ -109,6 +109,7 @@ interface CommentsCtx {
   members: CommentMember[]; nameOf: (id: string) => string;
   currentUserId?: string; myId: string; myName: string;
   scopeLabel: string;
+  loading: boolean; error: string; retry: () => void;
   onResolve: (id: string, r: boolean) => Promise<void>; onDelete: (id: string) => Promise<void>;
   submitReply: (parentId: string, body: string) => Promise<void>;
   /** Highlight info for a doc source line, or null if not commented. */
@@ -117,15 +118,19 @@ interface CommentsCtx {
 }
 const Ctx = createContext<CommentsCtx | null>(null);
 
-export function CommentsProvider({
-  store, pageSlug, source, articleRef, children,
-}: {
+interface CommentsProviderProps {
   store: PageCommentStore | null;
   pageSlug: string;
   source: string;
   articleRef: React.RefObject<HTMLElement | null>;
   children: React.ReactNode;
-}) {
+}
+
+export function CommentsProvider(props: CommentsProviderProps) {
+  return <CommentsSession key={`${props.store?.key ?? 'none'}:${props.pageSlug}`} {...props} />;
+}
+
+function CommentsSession({ store, pageSlug, source, articleRef, children }: CommentsProviderProps) {
   const [comments, setComments] = useState<PageComment[]>([]);
   const [snapshots, setSnapshots] = useState<{ content_hash: string; source: string }[]>([]);
   const [members, setMembers] = useState<CommentMember[]>([]);
@@ -133,19 +138,37 @@ export function CommentsProvider({
   const [panelOpen, setPanelOpen] = useState(false);
   const [pending, setPending] = useState<{ start: number; end: number; x: number; y: number } | null>(null);
   const [composing, setComposing] = useState<{ start: number; end: number; quote: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const requestId = useRef(0);
   const enabled = !!store && !!pageSlug;
 
   const reload = useCallback(async () => {
     if (!store || !pageSlug) { setComments([]); setSnapshots([]); return; }
-    const res = await store.list(pageSlug);
-    setComments(res.comments);
-    setSnapshots(res.snapshots);
+    const id = ++requestId.current;
+    setLoading(true);
+    setError('');
+    try {
+      const res = await store.list(pageSlug);
+      if (id !== requestId.current) return;
+      setComments(res.comments);
+      setSnapshots(res.snapshots);
+    } catch (cause) {
+      if (id === requestId.current) setError(cause instanceof Error ? cause.message : 'Could not load comments.');
+    } finally {
+      if (id === requestId.current) setLoading(false);
+    }
   }, [store, pageSlug]);
 
-  useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => {
+    void reload();
+    return () => { requestId.current += 1; };
+  }, [reload]);
   useEffect(() => {
     if (!store) return;
-    store.listMembers().then(setMembers).catch(() => setMembers([]));
+    let active = true;
+    store.listMembers().then((next) => { if (active) setMembers(next); }).catch(() => { if (active) setMembers([]); });
+    return () => { active = false; };
   }, [store]);
   // Reset the focused thread when navigating to a different page.
   useEffect(() => { setActiveId(null); }, [pageSlug]);
@@ -230,6 +253,14 @@ export function CommentsProvider({
     await store.create({ pagePath: pageSlug, body: body.trim(), parentId });
     await reload();
   };
+  const updateThread = async (operation: () => Promise<unknown>) => {
+    try {
+      await operation();
+      await reload();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not update comment.');
+    }
+  };
 
   const value: CommentsCtx = {
     enabled,
@@ -240,8 +271,9 @@ export function CommentsProvider({
     members, nameOf, currentUserId: store?.currentUserId,
     myId: store?.currentUserId ?? 'me', myName: store?.currentUserName ?? 'You',
     scopeLabel: store?.scopeLabel ?? '',
-    onResolve: async (id, r) => { if (store) await store.setResolved(id, r); await reload(); },
-    onDelete: async (id) => { if (store) await store.delete(id); await reload(); },
+    loading, error, retry: () => { void reload(); },
+    onResolve: async (id, r) => { if (store) await updateThread(() => store.setResolved(id, r)); },
+    onDelete: async (id) => { if (store) await updateThread(() => store.delete(id)); },
     submitReply,
     lineHighlight: (line) => (lineToThread.has(line) ? { active: lineToThread.get(line) === activeId } : null),
     focusLine: (line) => { const id = lineToThread.get(line); if (id) { setActiveId(id); setPanelOpen(true); } },
@@ -344,10 +376,10 @@ export function CommentsPanel() {
   if (!ctx) return null;
   const { anchored, outdated, resolved, openCount, activeId, setActive, panelOpen, setPanelOpen,
     composing, cancelCompose, submitNew, members, nameOf, currentUserId, myId, myName,
-    onResolve, onDelete, submitReply, scopeLabel } = ctx;
+    onResolve, onDelete, submitReply, scopeLabel, loading, error, retry } = ctx;
 
   // Collapsed: nothing here — the header toggle reopens the panel.
-  if (!panelOpen || (openCount === 0 && resolved.length === 0 && !composing)) return null;
+  if (!panelOpen) return null;
 
   return (
     <aside id="page-comments-panel" style={{
@@ -366,6 +398,11 @@ export function CommentsPanel() {
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', padding: '4px 16px 24px' }}>
+        {error && <div role="alert" style={{ color: C.red, fontSize: 13, padding: '12px 0' }}>{error} <button onClick={retry} style={ghostBtn}>Retry</button></div>}
+        {loading && <p role="status" style={{ color: C.muted, fontSize: 13 }}>Loading comments…</p>}
+        {!loading && !error && openCount === 0 && resolved.length === 0 && !composing && (
+          <p style={{ color: C.muted, fontSize: 13 }}>No comments yet. Select text in the page to start a discussion.</p>
+        )}
         {composing && (
           <Composer quote={composing.quote} meId={myId} meName={myName} members={members}
             placeholder="Add a comment…  use @ to mention" autoFocus
@@ -373,7 +410,7 @@ export function CommentsPanel() {
         )}
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {[...anchored, ...outdated].map((t) => (
+          {[...anchored, ...(showOutdated ? outdated : [])].map((t) => (
             <CommentCard key={t.root.id} t={t} active={t.root.id === activeId} members={members}
               meId={myId} meName={myName} currentUserId={currentUserId} nameOf={nameOf}
               onActivate={() => setActive(t.root.id)}
@@ -515,6 +552,9 @@ function Composer({
   onCancel: () => void; onSubmit: (body: string) => void | Promise<void>; primaryLabel: string;
 }) {
   const [value, setValue] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+  const submitting = useRef(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const [menu, setMenu] = useState<{ query: string; at: number } | null>(null);
 
@@ -530,6 +570,21 @@ function Composer({
     ref.current?.focus();
   };
   const matches = menu ? members.filter((m) => m.mention.toLowerCase().startsWith(menu.query.toLowerCase())).slice(0, 5) : [];
+  const submit = async () => {
+    if (submitting.current || !value.trim()) return;
+    submitting.current = true;
+    setSending(true);
+    setError('');
+    setMenu(null);
+    try {
+      await onSubmit(value);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not save comment. Try again.');
+    } finally {
+      submitting.current = false;
+      setSending(false);
+    }
+  };
 
   return (
     <div style={{ marginBottom: compact ? 0 : 14, marginTop: compact ? 4 : 0 }}>
@@ -540,19 +595,20 @@ function Composer({
       )}
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
         <Avatar id={meId} name={meName} size={22} />
-        <div style={{ flex: 1, position: 'relative', border: `1.5px solid ${C.accent}`, borderRadius: 9, background: C.panel, overflow: 'hidden' }}>
-          <textarea ref={ref} value={value} placeholder={placeholder} rows={2} autoFocus={autoFocus}
+        <div style={{ flex: 1, position: 'relative', border: `1.5px solid ${C.accent}`, borderRadius: 9, background: C.panel }}>
+          <textarea ref={ref} value={value} placeholder={placeholder} rows={2} autoFocus={autoFocus} disabled={sending}
             onChange={(e) => sync(e.target.value, e.target.selectionStart)}
             style={{ width: '100%', border: 'none', outline: 'none', resize: 'none', padding: '8px 10px', fontSize: 13.5, lineHeight: 1.5, color: C.ink, fontFamily: fonts.sans, boxSizing: 'border-box', background: 'transparent' }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderTop: `1px solid ${C.lineSoft}` }}>
             <AtSign size={15} color={C.faint} />
             <div style={{ flex: 1 }} />
-            <button onClick={onCancel} style={{ ...ghostBtn, padding: '5px 9px' }}>Cancel</button>
-            <button onClick={() => onSubmit(value)} disabled={!value.trim()}
+            <button onClick={onCancel} disabled={sending} style={{ ...ghostBtn, padding: '5px 9px' }}>Cancel</button>
+            <button onClick={() => void submit()} disabled={!value.trim() || sending}
               style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 7, border: 'none', background: value.trim() ? C.accent : C.line, color: value.trim() ? C.onAccent : C.faint, fontSize: 12.5, fontWeight: 600, cursor: value.trim() ? 'pointer' : 'default' }}>
-              {primaryLabel}
+              {sending ? 'Sending…' : primaryLabel}
             </button>
           </div>
+          {error && <p role="alert" style={{ color: C.red, fontSize: 12, padding: '0 10px 8px' }}>{error}</p>}
           {matches.length > 0 && (
             <div style={{ position: 'absolute', top: '100%', left: 0, zIndex: 70, marginTop: 2, minWidth: 170, background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, boxShadow: shadows.popover, overflow: 'hidden' }}>
               {matches.map((m) => (

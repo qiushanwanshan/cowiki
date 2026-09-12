@@ -84,7 +84,7 @@ import { sourceOrganizationTask } from '@/lib/source-ingest';
 import { resolveWorkspaceSwitchTarget } from '@/lib/workspace-navigation';
 import { getCloudStatus } from '@/local-api';
 import { createCloudClient } from '@/cloud/client';
-import { cloudPageCommentStore, localPageCommentStore } from '@/lib/page-comment-store';
+import { cloudPageCommentStore, desktopPageCommentStore } from '@/lib/page-comment-store';
 
 type ActiveView =
   | { kind: 'page'; slug: string; path?: string; content: PageFull | null }
@@ -287,10 +287,10 @@ export function MainLayout() {
     () => cloudSession ? createCloudClient(cloudSession) : null,
     [cloudSession],
   );
-  const [commentCloudSpace, setCommentCloudSpace] = useState<{ slug: string; id: string } | null>(null);
+  const [commentCloudSpace, setCommentCloudSpace] = useState<{ slug: string; id: string | null } | null>(null);
 
   useEffect(() => {
-    if (!desktop || !activeWorkspace || !cloudSession) {
+    if (!desktop || !activeWorkspace) {
       setCommentCloudSpace(null);
       return;
     }
@@ -298,13 +298,11 @@ export function MainLayout() {
     void getCloudStatus(activeWorkspace.slug)
       .then((status) => {
         if (!active) return;
-        setCommentCloudSpace(status.cloudSpaceId
-          ? { slug: activeWorkspace.slug, id: status.cloudSpaceId }
-          : null);
+        setCommentCloudSpace({ slug: activeWorkspace.slug, id: status.cloudSpaceId ?? null });
       })
       .catch(() => { if (active) setCommentCloudSpace(null); });
     return () => { active = false; };
-  }, [activeWorkspace, cloudSession, desktop]);
+  }, [activeWorkspace, cloudSession, desktop, reviewRefreshKey]);
 
   // Load pages for a space.
   const loadSpacePages = useCallback(async (ws: Workspace) => {
@@ -780,15 +778,7 @@ export function MainLayout() {
   const commentStore = useMemo(() => {
     if (!activeWorkspace) return null;
     if (desktop) {
-      if (cloudClient && cloudSession && commentCloudSpace?.slug === activeWorkspace.slug) {
-        return cloudPageCommentStore(
-          cloudClient,
-          commentCloudSpace.id,
-          cloudSession.userId,
-          cloudSession.userName,
-        );
-      }
-      return localPageCommentStore(activeWorkspace.slug);
+      return desktopPageCommentStore(activeWorkspace.slug, commentCloudSpace, cloudClient, cloudSession);
     }
     if (cloudClient && cloudSession) {
       return cloudPageCommentStore(

@@ -7,6 +7,7 @@ export interface CommentMember extends Pick<MemberInfo, 'id' | 'name'> {
 }
 
 export interface PageCommentStore {
+  readonly key: string;
   readonly scope: 'local' | 'cloud';
   readonly scopeLabel: string;
   readonly currentUserId: string;
@@ -29,6 +30,7 @@ export function localPageCommentStore(spaceSlug: string): PageCommentStore {
   const currentUserId = 'local';
   const currentUserName = 'You';
   return {
+    key: `local:${spaceSlug}`,
     scope: 'local',
     scopeLabel: 'Local only',
     currentUserId,
@@ -63,6 +65,7 @@ export function cloudPageCommentStore(
   currentUserName: string,
 ): PageCommentStore {
   return {
+    key: `cloud:${spaceId}:${currentUserId}`,
     scope: 'cloud',
     scopeLabel: 'Cloud shared',
     currentUserId,
@@ -99,6 +102,20 @@ export function cloudPageCommentStore(
     },
     delete: (commentId) => client.deleteComment(spaceId, commentId),
   };
+}
+
+export function desktopPageCommentStore(
+  spaceSlug: string,
+  link: { slug: string; id: string | null } | null | undefined,
+  client: CloudClient | null,
+  session: { userId: string; userName: string } | null,
+): PageCommentStore | null {
+  // Unknown is not unlinked: never fork shared comments into local storage.
+  if (!link || link.slug !== spaceSlug) return null;
+  if (link.id) {
+    return client && session ? cloudPageCommentStore(client, link.id, session.userId, session.userName) : null;
+  }
+  return localPageCommentStore(spaceSlug);
 }
 
 function cloudComment(comment: CloudComment, workspaceSlug: string): PageComment {
