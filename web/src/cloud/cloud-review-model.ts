@@ -5,7 +5,7 @@ import type { CloudPullRequestDiff } from './client';
 
 export function cloudDiffToFileDiffs(diff: CloudPullRequestDiff): FileDiff[] {
   const parsedByPath = new Map(
-    parsePatch(diff.patch).map((file) => [cleanPath(file.newFileName ?? file.oldFileName), file]),
+    parsePatch(diff.patch).map((file) => [cleanPath(file.newFileName) || cleanPath(file.oldFileName), file]),
   );
 
   return diff.files.map((file) => {
