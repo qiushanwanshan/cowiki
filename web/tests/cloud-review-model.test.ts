@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { cloudDiffToFileDiffs } from '../src/cloud/cloud-review-model.ts';
+import { CloudApiError } from '../src/cloud/client.ts';
+import {
+  cloudDiffToFileDiffs,
+  cloudMergeErrorMessage,
+} from '../src/cloud/cloud-review-model.ts';
 
 test('Cloud unified patches adapt to the shared client DiffView model', () => {
   const diffs = cloudDiffToFileDiffs({
@@ -43,4 +47,24 @@ test('Cloud unified patches adapt to the shared client DiffView model', () => {
   assert.equal(diffs[0]?.new_content, '');
   assert.equal(diffs[1]?.old_content, null);
   assert.equal(diffs[1]?.new_content, '');
+});
+
+test('Cloud merge failures distinguish stale heads from real file conflicts', () => {
+  assert.equal(
+    cloudMergeErrorMessage(new CloudApiError(409, 'server detail', 'stale_head')),
+    'This pull request changed. Review the latest head before merging.',
+  );
+  assert.equal(
+    cloudMergeErrorMessage(new CloudApiError(
+      409,
+      'server detail',
+      'merge_conflict',
+      ['wiki/index.md', 'wiki/roadmap.md'],
+    )),
+    'This pull request conflicts with the latest Cloud main in: wiki/index.md, wiki/roadmap.md.',
+  );
+  assert.equal(
+    cloudMergeErrorMessage(new CloudApiError(409, 'Pull request is closed')),
+    'Pull request is closed',
+  );
 });
