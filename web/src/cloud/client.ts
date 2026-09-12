@@ -132,12 +132,19 @@ export interface CloudPullRequestDiff {
 export class CloudApiError extends Error {
   readonly status: number;
   readonly code: string | null;
+  readonly conflicts: string[] | null;
 
-  constructor(status: number, message: string, code: string | null = null) {
+  constructor(
+    status: number,
+    message: string,
+    code: string | null = null,
+    conflicts: string[] | null = null,
+  ) {
     super(message);
     this.name = 'CloudApiError';
     this.status = status;
     this.code = code;
+    this.conflicts = conflicts;
   }
 }
 
@@ -187,11 +194,15 @@ export function createCloudClient(
       const payload = await response.json().catch(() => null) as {
         error?: string;
         code?: string;
+        conflicts?: unknown;
       } | null;
       throw new CloudApiError(
         response.status,
         payload?.error || `Cloud request failed (${response.status})`,
         payload?.code ?? null,
+        Array.isArray(payload?.conflicts)
+          ? payload.conflicts.filter((path): path is string => typeof path === 'string')
+          : null,
       );
     }
     if (response.status === 204) return undefined as T;

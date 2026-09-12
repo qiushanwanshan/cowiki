@@ -98,7 +98,11 @@ test('Cloud mutations serialize the current contract and surface typed failures'
   const fakeFetch: CloudFetch = async (input, init) => {
     calls.push({ url: String(input), init });
     if (calls.length === 3) {
-      return Response.json({ error: 'pull request head changed' }, { status: 409 });
+      return Response.json({
+        error: 'pull request conflicts with Cloud main',
+        code: 'merge_conflict',
+        conflicts: ['wiki/index.md'],
+      }, { status: 409 });
     }
     return Response.json({ ok: true });
   };
@@ -117,7 +121,9 @@ test('Cloud mutations serialize the current contract and surface typed failures'
     ),
     (error: unknown) => error instanceof CloudApiError
       && error.status === 409
-      && error.message === 'pull request head changed',
+      && error.message === 'pull request conflicts with Cloud main'
+      && error.code === 'merge_conflict'
+      && error.conflicts?.[0] === 'wiki/index.md',
   );
 
   assert.equal(calls[0].init?.method, 'POST');
