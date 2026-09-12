@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::knowledge_index::{self, SearchHit};
 use crate::okf::{self, DocumentKind};
+use crate::web_source::{self, WebSourceSnapshot};
 
 mod agent_changes;
 mod comments;
@@ -627,20 +628,26 @@ impl LocalEngine {
     ) -> Result<SourceItem, String> {
         let space = self.find_space(space_slug)?;
         okf::ensure_supported_for_write(&space.local_path)?;
-        let fallback = match source_type {
-            "url" => url::Url::parse(content.trim())
-                .ok()
-                .and_then(|value| value.host_str().map(ToOwned::to_owned))
-                .unwrap_or_else(|| "web-source".to_string()),
-            _ => "source".to_string(),
-        };
+        if source_type == "url" {
+            let snapshot = web_source::fetch_markdown_snapshot(content)?;
+            let content_hash = sha256_bytes(snapshot.markdown.as_bytes());
+            let requested = filename.unwrap_or(&snapshot.title);
+            let source = self.write_source_document(
+                &space,
+                requested,
+                &snapshot.title,
+                &snapshot.markdown,
+                Some(&content_hash),
+                Some(&snapshot),
+            )?;
+            self.refresh_source_views(&space)?;
+            return Ok(source);
+        }
+        let fallback = "source".to_string();
         let requested = filename.unwrap_or(&fallback);
-        let title = if source_type == "url" {
-            content.trim()
-        } else {
-            requested.trim()
-        };
-        let source = self.write_source_document(&space, requested, title, content.trim(), None)?;
+        let title = requested.trim();
+        let source =
+            self.write_source_document(&space, requested, title, content.trim(), None, None)?;
         self.refresh_source_views(&space)?;
         Ok(source)
     }
@@ -699,7 +706,14 @@ impl LocalEngine {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or(original_name);
-        self.write_source_document(space, original_name, title, &text, Some(&content_hash))
+        self.write_source_document(
+            space,
+            original_name,
+            title,
+            &text,
+            Some(&content_hash),
+            None,
+        )
     }
 
     /// Shared write path for every ingest flavor: pasted text, a URL
@@ -722,11 +736,13 @@ impl LocalEngine {
         title: &str,
         body_text: &str,
         content_hash: Option<&str>,
+        web_snapshot: Option<&WebSourceSnapshot>,
     ) -> Result<SourceItem, String> {
         let relative = okf::source_storage_path(requested_filename)?;
         let mut candidate = checked_space_path(&space.local_path, &relative)?;
+        let source_url = web_snapshot.map(|snapshot| snapshot.source_url.as_str());
         if candidate.exists() {
-            if content_hash.is_some_and(|hash| source_hash_matches(&candidate, hash)) {
+            if content_hash.is_some_and(|hash| source_hash_matches(&candidate, hash, source_url)) {
                 return source_item_for_path(space, &candidate);
             }
 
@@ -744,7 +760,7 @@ impl LocalEngine {
                         found = Some(next);
                         break;
                     }
-                    if source_hash_matches(&next, hash) {
+                    if source_hash_matches(&next, hash, source_url) {
                         return source_item_for_path(space, &next);
                     }
                 }
@@ -771,7 +787,17 @@ impl LocalEngine {
         }
 
         let mut frontmatter = format!("title: {}\ntype: Source\n", yaml_string(title));
-        if let Some(hash) = content_hash {
+        if let Some(snapshot) = web_snapshot {
+            frontmatter.push_str(&format!(
+                "source_url: {}\ncaptured_at: {}\nextractor: {}\n",
+                yaml_string(&snapshot.source_url),
+                yaml_string(&snapshot.captured_at),
+                yaml_string(web_source::EXTRACTOR_NAME),
+            ));
+            if let Some(hash) = content_hash {
+                frontmatter.push_str(&format!("content_hash: {}\n", yaml_string(hash)));
+            }
+        } else if let Some(hash) = content_hash {
             frontmatter.push_str(&format!("source_hash: {}\n", yaml_string(hash)));
         }
         let body = format!("---\n{frontmatter}---\n\n{}\n", body_text.trim());
@@ -2098,11 +2124,13 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn source_hash_matches(path: &Path, expected_hash: &str) -> bool {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|existing| frontmatter_field(&existing, "source_hash"))
-        .is_some_and(|existing_hash| existing_hash == expected_hash)
+fn source_hash_matches(path: &Path, expected_hash: &str, expected_url: Option<&str>) -> bool {
+    std::fs::read_to_string(path).ok().is_some_and(|existing| {
+        let hash = frontmatter_field(&existing, "source_hash")
+            .or_else(|| frontmatter_field(&existing, "content_hash"));
+        hash.as_deref() == Some(expected_hash)
+            && frontmatter_field(&existing, "source_url").as_deref() == expected_url
+    })
 }
 
 fn source_item_for_path(space: &Space, path: &Path) -> Result<SourceItem, String> {
@@ -2286,7 +2314,10 @@ pub(crate) fn markdown_title(body: &str) -> Option<String> {
 mod tests {
     use super::{sha256_file, CloudLink, LocalEngine};
     use git2::Repository;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::{mpsc, Arc, Barrier};
+    use std::thread;
     use std::time::Duration;
 
     #[test]
@@ -4171,6 +4202,123 @@ mod tests {
             .any(|diff| diff.path == format!(".cowiki/sources/{}", item.filename)));
         assert!(engine.submit(&space.slug, &[]).unwrap().committed);
         assert!(!engine.has_uncommitted_changes(&space.slug).unwrap());
+    }
+
+    #[test]
+    fn web_sources_with_identical_text_keep_distinct_origin_urls() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = LocalEngine::open(&temp.path().join("metadata")).unwrap();
+        let folder = temp.path().join("knowledge");
+        std::fs::create_dir_all(&folder).unwrap();
+        let space = engine.add_space("Knowledge", "knowledge", &folder).unwrap();
+        let mut snapshot = crate::web_source::WebSourceSnapshot {
+            title: "Same title".into(),
+            source_url: "https://one.example/article".into(),
+            captured_at: "2026-09-12T00:00:00Z".into(),
+            markdown: "# Same text".into(),
+        };
+        let hash = super::sha256_bytes(snapshot.markdown.as_bytes());
+        let first = engine
+            .write_source_document(
+                &space,
+                &snapshot.title,
+                &snapshot.title,
+                &snapshot.markdown,
+                Some(&hash),
+                Some(&snapshot),
+            )
+            .unwrap();
+        snapshot.source_url = "https://two.example/article".into();
+        let second = engine
+            .write_source_document(
+                &space,
+                &snapshot.title,
+                &snapshot.title,
+                &snapshot.markdown,
+                Some(&hash),
+                Some(&snapshot),
+            )
+            .unwrap();
+        assert_ne!(
+            first.filename, second.filename,
+            "different origins must not reuse another source's provenance"
+        );
+        assert!(engine
+            .get_source(&space.slug, &second.filename)
+            .unwrap()
+            .content
+            .contains("https://two.example/article"));
+        let repeated = engine
+            .write_source_document(
+                &space,
+                &snapshot.title,
+                &snapshot.title,
+                &snapshot.markdown,
+                Some(&hash),
+                Some(&snapshot),
+            )
+            .unwrap();
+        assert_eq!(second.filename, repeated.filename);
+    }
+
+    #[test]
+    fn url_ingest_captures_a_markdown_snapshot_with_provenance() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let html = r#"<!doctype html>
+<html>
+  <head><title>CoWiki &amp; Local AI</title></head>
+  <body>
+    <nav>Site navigation</nav>
+    <main>
+      <h1>Knowledge stays yours</h1>
+      <p>Agents can build on <a href="/principles">portable knowledge</a>.</p>
+    </main>
+    <script>window.secret = "must not be stored";</script>
+  </body>
+</html>"#;
+        let html_bytes = html.as_bytes().to_vec();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                html_bytes.len()
+            )
+            .unwrap();
+            stream.write_all(&html_bytes).unwrap();
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let engine = LocalEngine::open(&temp.path().join("metadata")).unwrap();
+        let folder = temp.path().join("knowledge");
+        std::fs::create_dir_all(&folder).unwrap();
+        let space = engine.add_space("Knowledge", "knowledge", &folder).unwrap();
+        let source_url = format!("http://{address}/article");
+
+        let item = engine
+            .ingest(&space.slug, "url", &source_url, None)
+            .unwrap();
+        assert_eq!(item.title, "CoWiki & Local AI");
+        server.join().unwrap();
+        let source = engine.get_source(&space.slug, &item.filename).unwrap();
+        assert!(source
+            .content
+            .contains(&format!("source_url: \"{source_url}\"")));
+        assert!(source.content.contains("captured_at:"));
+        assert!(source
+            .content
+            .contains("extractor: \"cowiki-html-to-markdown-v1\""));
+        assert!(source.content.contains("content_hash:"));
+        assert!(source.content.contains("# Knowledge stays yours"));
+        assert!(source.content.contains(&format!(
+            "[portable knowledge](http://{address}/principles)"
+        )));
+        assert!(!source.content.contains("Site navigation"));
+        assert!(!source.content.contains("must not be stored"));
+        assert!(!folder.join(".cowiki/sources").join("article.html").exists());
     }
 
     #[test]

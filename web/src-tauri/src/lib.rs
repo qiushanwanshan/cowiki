@@ -5,6 +5,7 @@ mod local_engine;
 mod mcp;
 mod okf;
 mod terminal;
+mod web_source;
 
 use local_engine::{
     AgentChange, BrokenLink, Checkpoint, CommentMember, FileDiff, IngestFileOutcome, LocalEngine,
@@ -210,15 +211,20 @@ fn local_get_source(
 }
 
 #[tauri::command]
-fn local_ingest(
+async fn local_ingest(
     engine: State<'_, LocalEngine>,
     space_slug: String,
     source_type: String,
     content: String,
     filename: Option<String>,
 ) -> Result<SourceItem, String> {
-    let _mutation = engine.lock_mutations()?;
-    engine.ingest(&space_slug, &source_type, &content, filename.as_deref())
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _mutation = engine.lock_mutations()?;
+        engine.ingest(&space_slug, &source_type, &content, filename.as_deref())
+    })
+    .await
+    .map_err(|error| format!("local source import task failed: {error}"))?
 }
 
 #[tauri::command]
