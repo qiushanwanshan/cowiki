@@ -2,9 +2,27 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import React from 'react';
+import { MemoryRouter } from 'react-router-dom';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer } from 'vite';
 import { workspaceContextStatus } from '../src/lib/workspace-context.ts';
+
+test('the hosted Space shell actually exposes the shared Cloud context badge', async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL('../', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
+  try {
+    const { CloudSpaceView } = await vite.ssrLoadModule('/src/cloud/CloudSpaceView.tsx');
+    const html = renderToStaticMarkup(React.createElement(MemoryRouter, null,
+      React.createElement(CloudSpaceView, {
+        client: {}, onSignOut: () => undefined,
+        session: { userName: 'Reader', userId: '11111111-1111-4111-8111-111111111111' },
+        route: { spaceId: '22222222-2222-4222-8222-222222222222', view: 'wiki' },
+      }),
+    ));
+    assert.match(html, /title="Shared Cloud Space"[^>]*>[\s\S]*?<span>Cloud<\/span>/);
+  } finally {
+    await vite.close();
+  }
+});
 
 test('the visible header distinguishes local-only, pending upload and Cloud updates', async () => {
   const vite = await createServer({ root: fileURLToPath(new URL('../', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });

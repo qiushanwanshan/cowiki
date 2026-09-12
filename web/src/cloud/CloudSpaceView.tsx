@@ -5,7 +5,10 @@ import type { PageMeta, Workspace } from '../api';
 import {
   ContentBreadcrumb,
   ContentHeader,
+  ContentHeaderActions,
 } from '../components/layout/ContentHeader';
+import { WorkspaceContextBadge } from '../components/layout/WorkspaceContextBadge';
+import { workspaceContextStatus } from '../lib/workspace-context';
 import { SpacePanel, type NavTab } from '../components/layout/SpacePanel';
 import { SpaceRail } from '../components/layout/SpaceRail';
 import { TooltipProvider } from '../components/ui/tooltip';
@@ -188,6 +191,9 @@ export function CloudSpaceView({ client, session, route, onSignOut }: CloudSpace
                 </>
               )}
             </ContentBreadcrumb>
+            <ContentHeaderActions>
+              <WorkspaceContextBadge context={workspaceContextStatus({ desktop: false })} />
+            </ContentHeaderActions>
           </ContentHeader>
 
           <div className="relative min-h-0 flex-1">
