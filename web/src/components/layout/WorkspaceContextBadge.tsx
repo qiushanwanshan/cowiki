@@ -1,4 +1,4 @@
-import { Cloud } from 'lucide-react';
+import { Cloud, HardDrive } from 'lucide-react';
 import { C } from '@/lib/design';
 import type { WorkspaceContextStatus } from '@/lib/workspace-context';
 
@@ -22,23 +22,23 @@ export function WorkspaceContextBadge({
     border: 'none',
     borderRadius: 8,
     background: 'transparent',
-    color: C.muted,
     fontSize: 12.5,
     fontWeight: 500,
     whiteSpace: 'nowrap',
-    cursor: 'pointer',
+    cursor: onClick ? 'pointer' : 'default',
     ...style,
+    color: context.attention ? C.amber : C.muted,
   };
 
   return (
     <button
       type="button"
       onClick={onClick}
-      title={connected ? context.detail : 'Publish to Cloud'}
+      title={connected ? context.detail : `${context.detail}. Click to publish to Cloud.`}
       style={actionStyle}
     >
-      <Cloud size={14} />
-      <span>{connected ? 'Cloud' : 'Publish to Cloud'}</span>
+      {context.kind === 'local' ? <HardDrive size={14} /> : <Cloud size={14} />}
+      <span>{context.label}</span>
     </button>
   );
 }
