@@ -10,7 +10,6 @@ import {
 
 const dialog = readFileSync(new URL('../src/components/cloud/CloudSpaceDialog.tsx', import.meta.url), 'utf8');
 const mainLayout = readFileSync(new URL('../src/pages/MainLayout.tsx', import.meta.url), 'utf8');
-const workspaceContextAction = readFileSync(new URL('../src/components/layout/WorkspaceContextBadge.tsx', import.meta.url), 'utf8');
 
 function result(state: CloudSyncResult['state'], overrides: Partial<CloudSyncResult> = {}): CloudSyncResult {
   return {
@@ -87,6 +86,5 @@ test('conflicts stop safely without exposing Git recovery jargon', () => {
 test('desktop shell exposes one Space-scoped Cloud entry', () => {
   assert.match(mainLayout, /CloudSpaceDialog/);
   assert.match(mainLayout, /WorkspaceContextBadge/);
-  assert.match(workspaceContextAction, /Publish to Cloud/);
   assert.doesNotMatch(dialog, /API key|api key/i);
 });

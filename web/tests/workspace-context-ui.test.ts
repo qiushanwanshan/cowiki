@@ -37,6 +37,9 @@ test('the visible header distinguishes local-only, pending upload and Cloud upda
       // Inspect visible text, not the tooltip: readers must not need to hover to learn where their changes live.
       const visible = html.replace(/<[^>]*>/g, '');
       assert.ok(visible.includes(label), `Expected ${label} in visible header, got ${visible}`);
+      if (state === 'unlinked') {
+        assert.match(html, /title="[^"]*publish to Cloud/i, 'local-only context explains the publish action');
+      }
     }
   } finally {
     await vite.close();
