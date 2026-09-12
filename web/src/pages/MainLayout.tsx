@@ -50,6 +50,7 @@ import { PageEditor, type PageEditorHandle } from '../components/PageEditor';
 import { PageReader } from '../components/PageReader';
 import { TransferDialog } from '../components/TransferDialog';
 import { NotificationsPage } from '../components/notifications/NotificationsPage';
+import { CloudNotificationsPage } from '../cloud/CloudNotificationsPage';
 import { notificationUnreadCount } from '../api';
 import { CommentsProvider, CommentsPanel, CommentsHeaderToggle, commentMarkdownComponents } from '../components/PageCommentsLayer';
 import { C } from '@/lib/design';
@@ -1247,7 +1248,15 @@ export function MainLayout() {
             <div style={{ flex: 1, padding: '36px 56px 56px', position: 'relative' }}>
               {/* Notifications (cross-space inbox) */}
               {activeView?.kind === 'notifications' ? (
-                <NotificationsPage onUnreadChange={setNotifUnread} />
+                cloudClient && cloudSession ? (
+                  <CloudNotificationsPage
+                    client={cloudClient}
+                    session={cloudSession}
+                    onSignOut={handleLogout}
+                    embedded
+                    onUnreadChange={setNotifUnread}
+                  />
+                ) : <NotificationsPage onUnreadChange={setNotifUnread} />
 
               /* Review detail */
               ) : activeView?.kind === 'review-detail' ? (

@@ -65,6 +65,44 @@ test('a linked Space never falls back to local comments while offline or checkin
   assert.equal(desktopPageCommentStore('local-space', { slug: 'local-space', id: null }, null, null)?.scope, 'local');
 });
 
+test('desktop embeds the Cloud mention inbox without a second shell and updates its unread badge', async () => {
+  const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://localhost' });
+  Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Node: dom.window.Node, IS_REACT_ACT_ENVIRONMENT: true });
+  const { createRoot } = await import('react-dom/client');
+  const { MemoryRouter } = await import('react-router-dom');
+  const { CloudNotificationsPage } = await vite.ssrLoadModule('/src/cloud/CloudNotificationsPage.tsx');
+  const { createCloudClient } = await vite.ssrLoadModule('/src/cloud/client.ts');
+  const container = document.getElementById('root')!;
+  const root = createRoot(container);
+  const session = { baseUrl: 'https://cloud.example', apiKey: 'test-key', userId: '11111111-1111-4111-8111-111111111111', userName: 'Reader' };
+  const notification = { id: 'mention-1', spaceId: '22222222-2222-4222-8222-222222222222', spaceName: 'Team', pagePath: 'wiki/meeting.md', commentId: 'comment-1', actorHandle: 'reviewer', commentBody: 'Please check this note', read: false, createdAt: '2026-09-12T01:00:00Z' };
+  const requests: Array<{ url: string; method: string; body: unknown }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), method: options?.method ?? 'GET', body: options?.body });
+    return new Response(JSON.stringify(String(url).endsWith('/notifications') ? [notification] : []), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  let unread = -1;
+  try {
+    await act(async () => root.render(React.createElement(MemoryRouter, null,
+      React.createElement(CloudNotificationsPage, { client: createCloudClient(session), session,
+        embedded: true, onUnreadChange: (count: number) => { unread = count; }, onSignOut: () => undefined }),
+    )));
+    assert.match(container.textContent ?? '', /@reviewer mentioned you in Team/);
+    assert.match(container.textContent ?? '', /Please check this note/);
+    assert.equal(unread, 1, 'desktop badge receives the same inbox unread count');
+    assert.equal(container.querySelector('.h-screen'), null, 'an embedded inbox must not add another full-screen rail');
+    const mention = Array.from(container.querySelectorAll('button')).find((el) => el.textContent?.includes('Please check this note'))!;
+    await act(async () => mention.click());
+    assert.equal(unread, 0);
+    assert.ok(requests.some((request) => request.url.endsWith('/api/notifications/mention-1') && request.method === 'PATCH' && request.body === '{"read":true}'));
+  } finally {
+    await act(async () => root.unmount());
+    globalThis.fetch = originalFetch;
+    dom.window.close();
+  }
+});
+
 test('comments reject stale page responses and show a failed load instead of silently hiding the panel', async () => {
   const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://localhost' });
   Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Node: dom.window.Node, IS_REACT_ACT_ENVIRONMENT: true });

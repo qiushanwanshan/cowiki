@@ -12,10 +12,14 @@ export function CloudNotificationsPage({
   client,
   session,
   onSignOut,
+  embedded = false,
+  onUnreadChange,
 }: {
   client: CloudClient;
   session: CloudSession;
   onSignOut: () => void;
+  embedded?: boolean;
+  onUnreadChange?: (count: number) => void;
 }) {
   const navigate = useNavigate();
   const [spaces, setSpaces] = useState<CloudSpace[]>([]);
@@ -25,6 +29,10 @@ export function CloudNotificationsPage({
     () => notifications?.filter((notification) => !notification.read).length ?? 0,
     [notifications],
   );
+
+  useEffect(() => {
+    if (notifications !== null) onUnreadChange?.(unread);
+  }, [notifications, onUnreadChange, unread]);
 
   const reload = () => {
     void client.listNotifications()
@@ -56,8 +64,8 @@ export function CloudNotificationsPage({
 
   return (
     <TooltipProvider>
-      <div className="flex h-screen overflow-hidden bg-bg text-text">
-        <SpaceRail
+      <div className={embedded ? 'text-text' : 'flex h-screen overflow-hidden bg-bg text-text'}>
+        {!embedded && <SpaceRail
           workspaces={spaces}
           activeWorkspaceId={null}
           userName={session.userName}
@@ -75,8 +83,8 @@ export function CloudNotificationsPage({
           showDiscover={false}
           titlebarInset={false}
           createLabel="New shared Space"
-        />
-        <main className="min-w-0 flex-1 overflow-auto p-10">
+        />}
+        <main className={embedded ? 'min-w-0' : 'min-w-0 flex-1 overflow-auto p-10'}>
           <div className="mx-auto max-w-3xl">
             <div className="mb-6 flex items-center justify-between gap-4">
               <div>
