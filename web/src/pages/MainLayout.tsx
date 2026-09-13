@@ -86,6 +86,7 @@ import {
   type DefaultAgent,
 } from '@/lib/client-settings';
 import { sourceUrlFromDocument, splitSystemFrontmatter } from '@/lib/page-frontmatter';
+import { pageLineage, sourceFilename } from '@/lib/page-lineage';
 import { sourceOrganizationTask } from '@/lib/source-ingest';
 import { resolveWorkspaceSwitchTarget } from '@/lib/workspace-navigation';
 import { workspaceContextStatus } from '@/lib/workspace-context';
@@ -1443,8 +1444,19 @@ export function MainLayout() {
                   // panel is flush to the right edge and full height with its own
                   // scroll. Opening it shrinks the doc from the right only.
                   <PageReader
+                    key={(activeWorkspace?.slug ?? '') + ':' + (activeView.path ?? activeView.slug) + ':' + versionSelection.kind}
                     articleRef={articleRef}
                     body={renderBody(viewedPageBody)}
+                    lineage={pageLineage(
+                      viewedPageBody,
+                      versionSelection.kind === 'working' ? activeView.content.provenance : undefined,
+                    )}
+                    onOpenSource={(path) => {
+                      if (activeWorkspace) void selectSource(activeWorkspace, sourceFilename(path));
+                    }}
+                    loadSource={versionSelection.kind === 'working' && activeWorkspace
+                      ? (path) => getSource(activeWorkspace.slug, sourceFilename(path))
+                      : undefined}
                     markdownComponents={commentMarkdownComponents}
                     byline={versionSelection.kind === 'working' ? {
                       name: activeView.content.edited_by,

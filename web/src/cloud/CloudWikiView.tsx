@@ -7,6 +7,8 @@ import { resolveInitialCloudPage } from './cloud-shell-model';
 import { CloudNotice } from './CloudHome';
 import { CloudQuickSetup } from './CloudQuickSetup';
 import { cloudSpaceRoute } from './routes';
+import { pageLineage } from '../lib/page-lineage';
+import { SourcePreviewDialog } from '../components/SourcePreviewDialog';
 import {
   CommentsHeaderToggle,
   CommentsPanel,
@@ -37,6 +39,9 @@ export function CloudWikiView({
   const navigate = useNavigate();
   const [content, setContent] = useState<CloudContent | null>(null);
   const [contentError, setContentError] = useState<{ path: string; message: string } | null>(null);
+  const [sourcePath, setSourcePath] = useState('');
+  const [sourceContent, setSourceContent] = useState<CloudContent | null>(null);
+  const [sourceError, setSourceError] = useState('');
   const pages = useMemo(() => tree?.entries.filter((entry) => entry.kind === 'page') ?? [], [tree]);
   const currentContent = content?.path === documentPath ? content : null;
   const currentError = contentError?.path === documentPath ? contentError?.message ?? '' : '';
@@ -72,6 +77,19 @@ export function CloudWikiView({
     return () => { active = false; };
   }, [client, documentPath, space.id]);
 
+  useEffect(() => {
+    if (!sourcePath) return;
+    let active = true;
+    setSourceContent(null);
+    setSourceError('');
+    void client.getSourceContent(space.id, sourcePath)
+      .then((next) => { if (active) setSourceContent(next); })
+      .catch((cause) => {
+        if (active) setSourceError(cause instanceof Error ? cause.message : 'Could not load this Source.');
+      });
+    return () => { active = false; };
+  }, [client, sourcePath, space.id]);
+
   return (
     <div className="relative h-full min-h-0">
         {treeError ? (
@@ -87,13 +105,17 @@ export function CloudWikiView({
             source={splitSystemFrontmatter(currentContent.content).body}
             articleRef={articleRef}
           >
-            <CommentsHeaderToggle style={{
-              position: 'absolute', right: 20, top: 12, zIndex: 20,
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              border: 'none', borderRadius: 8, padding: '6px 9px', cursor: 'pointer',
-            }} />
             <PageReader
+              key={space.id + ':' + currentContent.path + ':' + currentContent.oid}
+              toolbar={<CommentsHeaderToggle style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                border: 'none', borderRadius: 8, padding: '6px 9px', cursor: 'pointer',
+              }} />}
               body={splitSystemFrontmatter(currentContent.content).body}
+              lineage={pageLineage(currentContent.content, currentContent.provenance)}
+              onOpenSource={setSourcePath}
+              loadSource={(path) => client.getSourceContent(space.id, path)}
+              onOpenReview={(id) => navigate(cloudSpaceRoute(space.id, 'reviews', id))}
               articleRef={articleRef}
               markdownComponents={commentMarkdownComponents}
               aside={<CommentsPanel />}
@@ -102,6 +124,13 @@ export function CloudWikiView({
         ) : tree && pages.length === 0 ? (
           <CloudQuickSetup space={space} canPublish={space.role === 'owner'} />
         ) : null}
+      <SourcePreviewDialog
+        open={!!sourcePath}
+        path={sourcePath}
+        content={sourceContent?.path === sourcePath ? sourceContent.content : null}
+        error={sourceError}
+        onOpenChange={(open) => { if (!open) setSourcePath(''); }}
+      />
     </div>
   );
 }
