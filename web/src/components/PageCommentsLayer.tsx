@@ -104,6 +104,7 @@ interface CommentsCtx {
   anchored: Thread[]; outdated: Thread[]; resolved: Thread[]; openCount: number;
   activeId: string | null; setActive: (id: string) => void;
   panelOpen: boolean; setPanelOpen: (b: boolean) => void;
+  lineageOpen: boolean; setLineageOpen: (b: boolean) => void;
   composing: { start: number; end: number; quote: string } | null;
   cancelCompose: () => void; submitNew: (body: string) => Promise<void>;
   members: CommentMember[]; nameOf: (id: string) => string;
@@ -117,6 +118,13 @@ interface CommentsCtx {
   focusLine: (line: number) => void;
 }
 const Ctx = createContext<CommentsCtx | null>(null);
+
+/** Share the right-hand slot with comments; standalone/public readers need no provider. */
+export function useReaderLineagePanel(): [boolean, (open: boolean) => void] {
+  const ctx = useContext(Ctx);
+  const local = useState(false);
+  return ctx ? [ctx.lineageOpen, ctx.setLineageOpen] : local;
+}
 
 interface CommentsProviderProps {
   store: PageCommentStore | null;
@@ -135,7 +143,10 @@ function CommentsSession({ store, pageSlug, source, articleRef, children }: Comm
   const [snapshots, setSnapshots] = useState<{ content_hash: string; source: string }[]>([]);
   const [members, setMembers] = useState<CommentMember[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [panelOpen, setPanelOpen] = useState(false);
+  const [panelOpen, setPanelOpenState] = useState(false);
+  const [lineageOpen, setLineageOpenState] = useState(false);
+  const setPanelOpen = (open: boolean) => { setPanelOpenState(open); if (open) setLineageOpenState(false); };
+  const setLineageOpen = (open: boolean) => { setLineageOpenState(open); if (open) setPanelOpenState(false); };
   const [pending, setPending] = useState<{ start: number; end: number; x: number; y: number } | null>(null);
   const [composing, setComposing] = useState<{ start: number; end: number; quote: string } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -267,6 +278,7 @@ function CommentsSession({ store, pageSlug, source, articleRef, children }: Comm
     anchored, outdated, resolved, openCount,
     activeId, setActive: setActiveId,
     panelOpen, setPanelOpen,
+    lineageOpen, setLineageOpen,
     composing, cancelCompose: () => { setComposing(null); setPending(null); }, submitNew,
     members, nameOf, currentUserId: store?.currentUserId,
     myId: store?.currentUserId ?? 'me', myName: store?.currentUserName ?? 'You',
