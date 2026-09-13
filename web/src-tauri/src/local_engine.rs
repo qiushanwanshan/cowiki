@@ -866,17 +866,44 @@ impl LocalEngine {
         read_page_tree(&space.local_path, &space.local_path)
     }
 
+    pub fn read_html_asset(
+        &self,
+        space_slug: &str,
+        document_path: &str,
+        asset_path: &str,
+    ) -> Result<Vec<u8>, String> {
+        let space = self.find_space(space_slug)?;
+        crate::html_assets::read_asset(&space.local_path, document_path, asset_path)
+    }
+
     pub fn get_page(&self, space_slug: &str, slug: &str) -> Result<PageFull, String> {
         let space = self.find_space(space_slug)?;
-        let relative = okf::concept_relative_path(slug)?;
+        let relative = if crate::html_assets::is_html(Path::new(slug)) {
+            ui_path(&space.local_path, slug)?;
+            PathBuf::from(slug)
+        } else {
+            okf::concept_relative_path(slug)?
+        };
         let path = checked_space_path(&space.local_path, &relative)?;
-        let body = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        let title = markdown_title(&body).unwrap_or_else(|| {
-            path.file_stem()
+        let body = if crate::html_assets::is_html(&path) {
+            String::from_utf8(crate::html_assets::read_limited(&path)?)
+                .map_err(|e| e.to_string())?
+        } else {
+            std::fs::read_to_string(&path).map_err(|e| e.to_string())?
+        };
+        let title = if crate::html_assets::is_html(&path) {
+            path.file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string()
-        });
+        } else {
+            markdown_title(&body).unwrap_or_else(|| {
+                path.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+        };
         Ok(PageFull {
             meta: PageMeta {
                 slug: slug.to_string(),
@@ -2187,6 +2214,17 @@ fn read_page_tree(root: &Path, current: &Path) -> Result<Vec<PageMeta>, String> 
                 kind: "folder".into(),
                 children: read_page_tree(root, &path)?,
             });
+        } else if crate::html_assets::is_html(&path) {
+            let relative = normalize_path(relative);
+            result.push(PageMeta {
+                slug: relative.clone(),
+                path: relative,
+                title: name,
+                summary: String::new(),
+                branch: "local".into(),
+                kind: "page".into(),
+                children: vec![],
+            });
         } else if DocumentKind::from_path(&path) == DocumentKind::Concept {
             let body = std::fs::read_to_string(&path).unwrap_or_default();
             let slug = normalize_path(&relative.with_extension(""));
@@ -2312,6 +2350,27 @@ pub(crate) fn markdown_title(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn html_files_are_visible_and_read_without_markdown_conversion() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = super::LocalEngine::open(&temp.path().join("metadata")).unwrap();
+        let folder = temp.path().join("space");
+        std::fs::create_dir_all(folder.join("paper/assets")).unwrap();
+        let original = "<!doctype html><title>Paper</title><h1>HTML paper</h1>";
+        std::fs::write(folder.join("paper/index.html"), original).unwrap();
+        engine.add_space("Demo", "demo", &folder).unwrap();
+        let tree = engine.list_pages("demo").unwrap();
+        let paper = tree.iter().find(|p| p.path == "paper").unwrap();
+        assert!(paper.children.iter().any(|p| p.path == "paper/index.html"));
+        let page = engine.get_page("demo", "paper/index.html").unwrap();
+        assert_eq!(page.body, original);
+        assert_eq!(page.meta.path, "paper/index.html");
+        assert_eq!(
+            std::fs::read_to_string(folder.join("paper/index.html")).unwrap(),
+            original
+        );
+        assert!(engine.get_page("demo", "../index.html").is_err());
+    }
     use super::{sha256_file, CloudLink, LocalEngine};
     use git2::Repository;
     use std::io::{Read, Write};

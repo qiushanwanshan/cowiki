@@ -1,5 +1,6 @@
 mod cloud_sync;
 mod extract;
+mod html_assets;
 mod knowledge_index;
 mod local_engine;
 mod mcp;
@@ -97,6 +98,16 @@ fn local_get_page(
     page_slug: String,
 ) -> Result<PageFull, String> {
     engine.get_page(&space_slug, &page_slug)
+}
+
+#[tauri::command]
+fn local_read_html_asset(
+    engine: State<'_, LocalEngine>,
+    space_slug: String,
+    document_path: String,
+    asset_path: String,
+) -> Result<Vec<u8>, String> {
+    engine.read_html_asset(&space_slug, &document_path, &asset_path)
 }
 
 #[tauri::command]
@@ -512,6 +523,7 @@ pub fn run() {
             local_add_space,
             local_list_pages,
             local_get_page,
+            local_read_html_asset,
             local_list_page_comments,
             local_create_page_comment,
             local_list_comment_members,

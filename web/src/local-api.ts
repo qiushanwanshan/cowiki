@@ -33,6 +33,10 @@ export function getPage(spaceSlug: string, conceptId: string): Promise<PageFull>
   return invoke('local_get_page', { spaceSlug, pageSlug: conceptId });
 }
 
+export function readHtmlAsset(spaceSlug: string, documentPath: string, assetPath: string): Promise<number[]> {
+  return invoke('local_read_html_asset', { spaceSlug, documentPath, assetPath });
+}
+
 export function listPageComments(spaceSlug: string, pageSlug: string): Promise<PageCommentsResponse> {
   return invoke('local_list_page_comments', { spaceSlug, pageSlug });
 }

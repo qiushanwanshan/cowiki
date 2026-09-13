@@ -59,7 +59,9 @@ import { apiOrigin, isDesktopClient } from '@/runtime';
 import { normalizeCloudSession } from '@/cloud/session';
 import { CloudSpaceDialog } from '@/components/cloud/CloudSpaceDialog';
 import { WorkspaceContextBadge } from '@/components/layout/WorkspaceContextBadge';
-import { getCloudStatus, type CloudSyncState } from '@/local-api';
+import { getCloudStatus, readHtmlAsset, type CloudSyncState } from '@/local-api';
+import { HtmlFileReader } from '../components/HtmlFileReader';
+import { isHtmlPath } from '../lib/okf-pages';
 import { chooseLocalSpaceDirectory, localSpaceIdentityFromPath } from '@/local-space';
 import {
   AgentTerminalPanel,
@@ -800,7 +802,14 @@ export function MainLayout() {
 
   // Page-view comment context: active only when reading (not editing) a page.
   const pageView = activeView?.kind === 'page' ? activeView : null;
-  const commentsActive = !!pageView?.content && !editingPage;
+  const isHtmlPage = !!pageView && isHtmlPath(pageView.path ?? pageView.slug);
+  const htmlDocumentPath = pageView?.path ?? pageView?.slug ?? '';
+  const htmlSpaceSlug = activeWorkspace?.slug ?? '';
+  const htmlAssetReader = useCallback((assetPath: string) => {
+    if (!htmlSpaceSlug || !htmlDocumentPath) return Promise.reject(new Error('No HTML document selected'));
+    return readHtmlAsset(htmlSpaceSlug, htmlDocumentPath, assetPath);
+  }, [htmlSpaceSlug, htmlDocumentPath]);
+  const commentsActive = !!pageView?.content && !editingPage && !isHtmlPage;
   const commentPageSlug = commentsActive && pageView
     ? (pageView.path ?? pageView.content?.path ?? '')
     : '';
@@ -1206,7 +1215,7 @@ export function MainLayout() {
                   />
                 )}
 
-                {desktop && activeWorkspace?.localPath && !editingPage && (
+                {desktop && activeWorkspace?.localPath && !editingPage && !isHtmlPage && (
                   <VersionSwitcher
                     selection={versionSelection}
                     agentChanges={openAgentChanges}
@@ -1231,7 +1240,7 @@ export function MainLayout() {
                 )}
 
                 {/* Wiki-specific actions */}
-                {versionSelection.kind === 'working' && activeTab === 'wiki' && (activeView?.kind === 'page' || activeView?.kind === 'source') && (
+                {!isHtmlPage && versionSelection.kind === 'working' && activeTab === 'wiki' && (activeView?.kind === 'page' || activeView?.kind === 'source') && (
                   <>
                     {activeView?.kind === 'page' && activeView.content && !editingPage && (
                       <button
@@ -1401,7 +1410,10 @@ export function MainLayout() {
 
               /* Page view */
               ) : activeView?.kind === 'page' && activeView.content ? (
-                editingPage ? (
+                isHtmlPage ? (
+                  <HtmlFileReader key={(activeWorkspace?.slug ?? '') + ':' + activeView.content.path + ':' + activeView.content.body}
+                    path={activeView.content.path} source={activeView.content.body} readAsset={htmlAssetReader} />
+                ) : editingPage ? (
                   <PageEditor
                     ref={pageEditorRef}
                     key={activeView.path ?? activeView.slug}
